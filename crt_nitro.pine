@@ -1,0 +1,948 @@
+//@version=6
+// ═════════════════════════════════════════════════════════════════════════════
+//  CRT NITRO — Candle Range Theory / liquidity sweep setups
+//  Indicator for ES / NQ / MES / MNQ (any symbol works).
+//
+//  Run on a 1m chart (recommended), or 3m/5m. The chart timeframe must divide
+//  every enabled CRT timeframe. The script builds 15m / 30m / 1H candles
+//  locally from chart bars, detects the C1-C2-C3 sequence, grades each TF's
+//  chop level (A-F), derives entry / TP / SL, tracks the outcome, and plots
+//  the first N setups per session per TF.
+//
+//  See README.md and DECISIONS.md.
+// ═════════════════════════════════════════════════════════════════════════════
+
+indicator("CRT Nitro — Sweep Setups", "CRT Nitro", overlay = true,
+     max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  1. INPUTS
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── Session ──────────────────────────────────────────────────────────────────
+string sessStr = input.session("0930-1300", "Session",
+     tooltip = "Setups only arm when C2 closes inside this window (exchange time).",
+     group = "Session")
+string sessTz = input.string("America/New_York", "Timezone", group = "Session")
+int maxPerSession = input.int(2, "Max setups per timeframe per session",
+     minval = 1, maxval = 5, group = "Session")
+string countMode = input.string("Armed", "Consume a slot on",
+     options = ["Armed", "Triggered"],
+     tooltip = "Armed: every detected setup counts toward the limit. Triggered: only setups that actually trigger count.",
+     group = "Session")
+
+// ── Timeframes ───────────────────────────────────────────────────────────────
+bool use15 = input.bool(true, "15m", inline = "tf", group = "Timeframes")
+bool use30 = input.bool(true, "30m", inline = "tf", group = "Timeframes")
+bool use60 = input.bool(true, "1H", inline = "tf", group = "Timeframes")
+int triggerWindowBars = input.int(1, "Trigger window (HTF candles after C2)",
+     minval = 1, maxval = 3, group = "Timeframes",
+     tooltip = "1 = entry must happen while C3 is forming (video rule).")
+
+// ── Trade model ──────────────────────────────────────────────────────────────
+float rrMult = input.float(1.5, "Risk:Reward", minval = 1.0, maxval = 3.0,
+     step = 0.1, group = "Trade")
+int minRewardTicks = input.int(0, "Minimum reward (ticks, 0 = off)",
+     minval = 0, group = "Trade")
+int minStopTicks = input.int(0, "Minimum stop (ticks, 0 = off)",
+     minval = 0, group = "Trade")
+bool invalidateOnSweepBreak = input.bool(true,
+     "Invalidate if the C2 sweep extreme breaks before entry", group = "Trade")
+bool triggerInSession = input.bool(true,
+     "Only trigger entries inside the session", group = "Trade")
+string ambiguousOutcome = input.string("Loss",
+     "When TP and SL are both touched in one bar", options = ["Loss", "Win", "Unknown"],
+     group = "Trade")
+bool requireBodyInside = input.bool(false,
+     "Require C2 open inside the C1 range", group = "Trade")
+
+// ── Chop filter ──────────────────────────────────────────────────────────────
+bool useChopFilter = input.bool(true, "Enable chop filter", group = "Chop filter",
+     tooltip = "Grades each CRT timeframe from A (little/no chop) to F (extreme chop) using completed HTF candles. The count/skip thresholds decide what is counted, faded (not counted), or skipped.")
+int chopLen = input.int(20, "Chop lookback (HTF candles)", minval = 5, maxval = 100,
+     group = "Chop filter",
+     tooltip = "Completed candles used by the score. 20 = 5h on 15m, 10h on 30m, 20h on 1H.")
+string chopCountMax = input.string("B", "Count setups up to grade",
+     options = ["A", "B", "C", "D"], group = "Chop filter",
+     tooltip = "A = little/no chop, B = low, C = moderate, D = high. Extreme (F) never counts. Default B: only sweeps in little-to-no chop are counted.")
+string chopSkipAt = input.string("F", "Skip setups from grade",
+     options = ["C", "D", "F"], group = "Chop filter",
+     tooltip = "Setups at or above this grade are not drawn or tracked. Grades between the count and skip thresholds are drawn faded and never counted.")
+bool showChopGhosts = input.bool(true, "Draw filtered setups faded (not counted)",
+     group = "Chop filter")
+
+// ── Bias filter ──────────────────────────────────────────────────────────────
+string biasMode = input.string("Auto 1H structure", "Bias filter",
+     options = ["Auto 1H structure", "EMA 1H", "Manual"], group = "Bias filter")
+int pivotLen = input.int(3, "Swing pivot length (1H)", minval = 1, maxval = 10,
+     group = "Bias filter")
+int emaLen = input.int(50, "EMA length (1H)", minval = 2, group = "Bias filter")
+string manualBias = input.string("Both", "Manual bias",
+     options = ["Both", "Long", "Short"], group = "Bias filter")
+string neutralMode = input.string("Both", "When the 1H bias is neutral",
+     options = ["Both", "None"], group = "Bias filter")
+bool showCounterTrend = input.bool(false,
+     "Draw counter-trend setups faded (not counted)", group = "Bias filter")
+
+// ── Sizing ───────────────────────────────────────────────────────────────────
+float riskUsd = input.float(0.0, "Account risk ($) for the size label (0 = off)",
+     minval = 0.0, group = "Sizing")
+
+// ── Visuals ──────────────────────────────────────────────────────────────────
+color col15 = input.color(#2962FF, "15m", inline = "col", group = "Visuals")
+color col30 = input.color(#FF9800, "30m", inline = "col", group = "Visuals")
+color col60 = input.color(#AB47BC, "1H", inline = "col", group = "Visuals")
+bool showC1Range = input.bool(true, "C1 range box", inline = "v1", group = "Visuals")
+bool showRiskBoxes = input.bool(true, "Reward / risk boxes", inline = "v1", group = "Visuals")
+bool showSweepMarkers = input.bool(true, "Sweep markers", inline = "v2", group = "Visuals")
+int maxHistoryPerTf = input.int(15, "Historical setups kept per timeframe",
+     minval = 1, maxval = 40, inline = "v2", group = "Visuals")
+bool showDashboard = input.bool(true, "Dashboard", inline = "v3", group = "Visuals")
+string dashPos = input.string("Top right", "Position",
+     options = ["Top right", "Top left", "Bottom right", "Bottom left"],
+     inline = "v3", group = "Visuals")
+bool debugMode = input.bool(false, "Debug: show reject reasons", group = "Visuals")
+string labelSizeOpt = input.string("Small", "Setup label font size",
+     options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Visuals",
+     tooltip = "Font size of the entry/TP/SL labels on the chart.")
+string dashSizeOpt = input.string("Tiny", "Dashboard font size",
+     options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Visuals",
+     tooltip = "Font size of the dashboard table.")
+
+// ── Alerts ───────────────────────────────────────────────────────────────────
+bool alertArm = input.bool(true, "Armed", inline = "al", group = "Alerts")
+bool alertTrig = input.bool(true, "Triggered", inline = "al", group = "Alerts")
+bool alertRes = input.bool(true, "Result", inline = "al", group = "Alerts")
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  2. RUNTIME VALIDATION
+// ═════════════════════════════════════════════════════════════════════════════
+
+int chartSec = timeframe.in_seconds()
+
+if chartSec == 0
+    runtime.error("CRT Nitro requires a time-based chart (1m recommended).")
+if chartSec > 900
+    runtime.error("CRT Nitro: use a chart timeframe of 15 minutes or lower (1m recommended).")
+if chartSec > 0
+    if use15 and 900 % chartSec != 0
+        runtime.error("CRT Nitro: 15m is not a multiple of the chart timeframe.")
+    if use30 and 1800 % chartSec != 0
+        runtime.error("CRT Nitro: 30m is not a multiple of the chart timeframe.")
+    if use60 and 3600 % chartSec != 0
+        runtime.error("CRT Nitro: 1H is not a multiple of the chart timeframe.")
+
+// ── Session context (declared before the functions that read it) ────────────
+bool inSess = not na(time(timeframe.period, sessStr, sessTz))
+int dayKey = inSess ? year(time, sessTz) * 10000 + month(time, sessTz) * 100 + dayofmonth(time, sessTz) : na
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  3. USER-DEFINED TYPES
+// ═════════════════════════════════════════════════════════════════════════════
+
+type Candle
+    float o = na
+    float h = na
+    float l = na
+    float c = na
+    int tOpen = na
+    int tClose = na
+    int barOpen = na
+    int barClose = na
+    bool inSess = false
+
+type Detection
+    int dir = 0
+    string reason = ""
+    float entry = na
+    float tp = na
+    float sl = na
+    float risk = na
+    float reward = na
+
+type Setup
+    string tf = ""
+    int dir = 0
+    string state = "ARMED"
+    int seq = 0
+    bool ghost = false
+    string ghostReason = ""
+    string chopGrade = "n/a"
+    float chopScore = na
+    Candle c1 = na
+    Candle c2 = na
+    float entry = na
+    float fill = na
+    float tp = na
+    float sl = na
+    float risk = na
+    float reward = na
+    int armedBar = na
+    int triggerBar = na
+    int resolveBar = na
+    int periodsLeft = 0
+    line lnE = na
+    line lnT = na
+    line lnS = na
+    box bxK = na
+    box bxR = na
+    box bxC1 = na
+    label lbl = na
+    label mk = na
+
+type TfContext
+    string tf = ""
+    string tfLabel = ""
+    bool enabled = true
+    color col = color.blue
+    Candle running = na
+    Candle prev1 = na
+    Candle prev2 = na
+    int cnt = 0
+    array<Setup> active = na
+    array<Setup> history = na
+    string lastReject = ""
+    array<float> chopHi = na
+    array<float> chopLo = na
+    array<float> chopCl = na
+    array<float> chopOp = na
+    array<float> chopTr = na
+    float chopScore = na
+    string chopGrade = "n/a"
+
+type EventBuf
+    array<string> arm = na
+    array<string> trig = na
+    array<string> res = na
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  4. STATE
+// ═════════════════════════════════════════════════════════════════════════════
+
+newTfContext(tf, tfLabel, enabled, col) =>
+    TfContext.new(tf = tf, tfLabel = tfLabel, enabled = enabled, col = col,
+         active = array.new<Setup>(), history = array.new<Setup>(),
+         chopHi = array.new<float>(), chopLo = array.new<float>(),
+         chopCl = array.new<float>(), chopOp = array.new<float>(),
+         chopTr = array.new<float>())
+
+var TfContext c15 = newTfContext("15", "15m", use15, col15)
+var TfContext c30 = newTfContext("30", "30m", use30, col30)
+var TfContext c60 = newTfContext("60", "1H", use60, col60)
+
+var EventBuf buf = EventBuf.new(arm = array.new<string>(),
+     trig = array.new<string>(), res = array.new<string>())
+
+// 1H structure used by the bias filter (always maintained, even if 1H CRT is off).
+var array<float> h1Hi = array.new<float>()
+var array<float> h1Lo = array.new<float>()
+var array<float> h1PH = array.new<float>()
+var array<float> h1PL = array.new<float>()
+var float h1Ema = na
+var int lastDayKey = na
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  5. PURE / STATE HELPERS
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Fold chart bars into one higher-timeframe candle. Returns true on the bar
+// where a new HTF period starts (i.e. the previous candle just finalized).
+aggregateTf(ctx, sess) =>
+    int pOpen = time(ctx.tf)
+    bool closed = false
+    if na(ctx.running)
+        ctx.running := Candle.new(o = open, h = high, l = low, c = close,
+             tOpen = pOpen, tClose = time_close(ctx.tf), barOpen = bar_index,
+             barClose = bar_index, inSess = sess)
+        closed := false
+    else if pOpen != ctx.running.tOpen
+        ctx.running.barClose := bar_index - 1
+        ctx.prev2 := ctx.prev1
+        ctx.prev1 := ctx.running
+        ctx.running := Candle.new(o = open, h = high, l = low, c = close,
+             tOpen = pOpen, tClose = time_close(ctx.tf), barOpen = bar_index,
+             barClose = bar_index, inSess = sess)
+        closed := true
+    else
+        ctx.running.h := math.max(ctx.running.h, high)
+        ctx.running.l := math.min(ctx.running.l, low)
+        ctx.running.c := close
+        ctx.running.barClose := bar_index
+        ctx.running.tClose := time_close(ctx.tf)
+        ctx.running.inSess := sess
+        closed := false
+    closed
+
+// C1 / C2 shape test + level geometry. Pure.
+detectCRT(c1, c2) =>
+    Detection det = Detection.new()
+    if na(c1) or na(c2)
+        det.reason := "warmup"
+    else
+        bool sweptLow = c2.l < c1.l
+        bool sweptHigh = c2.h > c1.h
+        bool closedIn = c2.c > c1.l and c2.c < c1.h
+        if sweptLow and sweptHigh
+            det.reason := "both sides swept"
+        else if not sweptLow and not sweptHigh
+            det.reason := "no sweep"
+        else if not closedIn
+            det.reason := "C2 closed outside range"
+        else if requireBodyInside and (c2.o <= c1.l or c2.o >= c1.h)
+            det.reason := "C2 open outside range"
+        else
+            int d = sweptLow ? 1 : -1
+            float entry = d > 0 ? c2.h : c2.l
+            float tp = d > 0 ? c1.h : c1.l
+            float reward = d > 0 ? tp - entry : entry - tp
+            float rewardTicks = reward / syminfo.mintick
+            float riskTicksRaw = (reward / rrMult) / syminfo.mintick
+            float riskTicks = math.floor(riskTicksRaw)
+            if riskTicks < 1
+                riskTicks := 1
+            float risk = riskTicks * syminfo.mintick
+            if reward <= 0
+                det.reason := "reward <= 0"
+            else if minRewardTicks > 0 and rewardTicks < minRewardTicks
+                det.reason := "reward below minimum"
+            else if minStopTicks > 0 and riskTicksRaw < minStopTicks
+                det.reason := "stop below minimum"
+            else
+                det.dir := d
+                det.entry := entry
+                det.tp := tp
+                det.sl := d > 0 ? entry - risk : entry + risk
+                det.risk := risk
+                det.reward := reward
+                det.reason := "ok"
+    det
+
+// Detect one new confirmed 1H swing high / low and push it into the pivot lists.
+updatePivots(hi, lo, ph, pl, len) =>
+    int n = array.size(hi)
+    if n >= 2 * len + 1
+        int k = n - 1 - len
+        float candH = array.get(hi, k)
+        float candL = array.get(lo, k)
+        bool isPH = true
+        bool isPL = true
+        for j = k - len to k + len
+            if j != k
+                if array.get(hi, j) > candH
+                    isPH := false
+                if array.get(lo, j) < candL
+                    isPL := false
+        if isPH
+            array.push(ph, candH)
+            if array.size(ph) > 4
+                array.shift(ph)
+        if isPL
+            array.push(pl, candL)
+            if array.size(pl) > 4
+                array.shift(pl)
+
+isTerminal(st) =>
+    st == "WIN" or st == "LOSS" or st == "UNKNOWN" or st == "EXPIRED" or st == "INVALIDATED" or st == "SKIPPED"
+
+// ── Chop grading ────────────────────────────────────────────────────────────
+// 0-100 score from completed HTF candles:
+//   50% Chande chop index, 30% inverse Kaufman efficiency ratio, 20% body overlap.
+// A < 20, B < 35, C < 50, D < 65, F >= 65.
+scoreToGrade(sc) =>
+    string g = "n/a"
+    if not na(sc)
+        if sc < 20.0
+            g := "A"
+        else if sc < 35.0
+            g := "B"
+        else if sc < 50.0
+            g := "C"
+        else if sc < 65.0
+            g := "D"
+        else
+            g := "F"
+    g
+
+gradeRank(g) =>
+    g == "A" ? 0 : g == "B" ? 1 : g == "C" ? 2 : g == "D" ? 3 : g == "F" ? 4 : -1
+
+gradeName(g) =>
+    g == "A" ? "none" : g == "B" ? "low" : g == "C" ? "moderate" : g == "D" ? "high" : g == "F" ? "extreme" : "n/a"
+
+recomputeChop(ctx) =>
+    int n = array.size(ctx.chopHi)
+    if n < 3
+        ctx.chopScore := na
+        ctx.chopGrade := "n/a"
+    else
+        float sumTr = 0.0
+        float hiMax = array.get(ctx.chopHi, 0)
+        float loMin = array.get(ctx.chopLo, 0)
+        for i = 0 to n - 1
+            sumTr += array.get(ctx.chopTr, i)
+            hiMax := math.max(hiMax, array.get(ctx.chopHi, i))
+            loMin := math.min(loMin, array.get(ctx.chopLo, i))
+        float span = hiMax - loMin
+
+        float absSum = 0.0
+        for i = 1 to n - 1
+            absSum += math.abs(array.get(ctx.chopCl, i) - array.get(ctx.chopCl, i - 1))
+        float net = math.abs(array.get(ctx.chopCl, n - 1) - array.get(ctx.chopCl, 0))
+        float er = absSum > 0.0 ? net / absSum : 0.0
+
+        float chopIdx = 100.0
+        if span > 0.0 and sumTr > 0.0
+            float ratio = sumTr / span
+            chopIdx := math.max(0.0, math.min(100.0, 100.0 * math.log10(ratio) / math.log10(n)))
+
+        float ovSum = 0.0
+        int pairs = 0
+        for i = 1 to n - 1
+            float a1 = math.max(array.get(ctx.chopOp, i), array.get(ctx.chopCl, i))
+            float b1 = math.min(array.get(ctx.chopOp, i), array.get(ctx.chopCl, i))
+            float a0 = math.max(array.get(ctx.chopOp, i - 1), array.get(ctx.chopCl, i - 1))
+            float b0 = math.min(array.get(ctx.chopOp, i - 1), array.get(ctx.chopCl, i - 1))
+            float ov = math.max(0.0, math.min(a1, a0) - math.max(b1, b0))
+            float den = math.min(a1 - b1, a0 - b0)
+            if den > 0.0
+                ovSum += ov / den
+            else
+                ovSum += 1.0
+            pairs += 1
+        float overlap = pairs > 0 ? ovSum / pairs : 1.0
+
+        float erChop = math.max(0.0, math.min(100.0, (1.0 - er) * 100.0))
+        float ovChop = math.max(0.0, math.min(100.0, overlap * 100.0))
+        ctx.chopScore := math.max(0.0, math.min(100.0, 0.5 * chopIdx + 0.3 * erChop + 0.2 * ovChop))
+        ctx.chopGrade := scoreToGrade(ctx.chopScore)
+
+// Append the newly completed HTF candle and refresh the score.
+updateChop(ctx) =>
+    if not na(ctx.prev1)
+        float pc = na(ctx.prev2) ? ctx.prev1.o : ctx.prev2.c
+        float tr = math.max(ctx.prev1.h - ctx.prev1.l, math.max(math.abs(ctx.prev1.h - pc), math.abs(ctx.prev1.l - pc)))
+        array.push(ctx.chopHi, ctx.prev1.h)
+        array.push(ctx.chopLo, ctx.prev1.l)
+        array.push(ctx.chopCl, ctx.prev1.c)
+        array.push(ctx.chopOp, ctx.prev1.o)
+        array.push(ctx.chopTr, tr)
+        if array.size(ctx.chopHi) > chopLen
+            array.shift(ctx.chopHi)
+            array.shift(ctx.chopLo)
+            array.shift(ctx.chopCl)
+            array.shift(ctx.chopOp)
+            array.shift(ctx.chopTr)
+    recomputeChop(ctx)
+
+// 0 = count, 1 = draw faded (not counted), 2 = skip entirely.
+chopVerdict(ctx) =>
+    int v = 0
+    if useChopFilter
+        int r = gradeRank(ctx.chopGrade)
+        if r >= 0
+            if r >= gradeRank(chopSkipAt)
+                v := 2
+            else if r > gradeRank(chopCountMax)
+                v := 1
+    v
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  6. FORMATTING
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Map the font-size inputs to Pine's size constants.
+txtSize(opt) =>
+    opt == "Tiny" ? size.tiny : opt == "Small" ? size.small : opt == "Normal" ? size.normal : opt == "Large" ? size.large : size.huge
+
+string labelSize = txtSize(labelSizeOpt)
+string dashSize = txtSize(dashSizeOpt)
+
+evMsg(s, kind) =>
+    string dirS = s.dir > 0 ? "LONG" : "SHORT"
+    string chopStr = s.chopGrade
+    if not na(s.chopScore)
+        chopStr := chopStr + " " + str.tostring(math.round(s.chopScore))
+    string base = kind + " | " + syminfo.ticker + " | " + s.tf + " | " + dirS + " | #" + str.tostring(s.seq) + " | E " + str.tostring(s.entry, format.mintick) + " | TP " + str.tostring(s.tp, format.mintick) + " | SL " + str.tostring(s.sl, format.mintick) + " | " + str.tostring(s.reward / s.risk, "#.##") + "R | CHOP " + chopStr
+    string out = base
+    if not na(s.fill)
+        out := base + " | FILL " + str.tostring(s.fill, format.mintick)
+    out
+
+buildText(s) =>
+    string arrow = s.dir > 0 ? "▲" : "▼"
+    float rewardTicks = s.reward / syminfo.mintick
+    float riskTicks = s.risk / syminfo.mintick
+    string sizeStr = ""
+    if riskUsd > 0 and syminfo.mintick > 0 and riskTicks > 0
+        float tickVal = syminfo.mintick * syminfo.pointvalue
+        if tickVal > 0
+            float ct = math.floor(riskUsd / (riskTicks * tickVal))
+            sizeStr := "  ·  " + str.tostring(ct, "#") + "ct"
+    string head = s.tf + " " + arrow + " CRT #" + str.tostring(s.seq) + (s.ghost ? "" : "  ·  chop " + s.chopGrade)
+    string row = head + "  ·  E " + str.tostring(s.entry, format.mintick) + "  ·  TP " + str.tostring(s.tp, format.mintick) + " (+" + str.tostring(rewardTicks, "#") + "t)  ·  SL " + str.tostring(s.sl, format.mintick) + " (−" + str.tostring(riskTicks, "#") + "t)  ·  " + str.tostring(s.reward / s.risk, "#.##") + "R" + sizeStr
+    string tail = ""
+    if s.state == "TRIGGERED"
+        tail := not na(s.fill) and s.fill != s.entry ? "  ·  FILLED " + str.tostring(s.fill, format.mintick) : ""
+    else if s.state == "WIN"
+        tail := "  ·  ✔ TP"
+    else if s.state == "LOSS"
+        tail := "  ·  ✘ SL"
+    else if s.state == "UNKNOWN"
+        tail := "  ·  ? AMBIGUOUS"
+    else if s.state == "EXPIRED"
+        tail := "  ·  ⌛ EXPIRED"
+    else if s.state == "INVALIDATED"
+        tail := "  ·  ⊘ INVALID"
+    else if s.state == "SKIPPED"
+        tail := "  ·  ⤫ SKIPPED"
+    else
+        tail := ""
+    string body = row + tail
+    s.ghost ? "✕ " + (s.ghostReason == "" ? "filtered" : s.ghostReason) + "  ·  " + body : body
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  7. RENDERING
+// ═════════════════════════════════════════════════════════════════════════════
+
+drawSetup(s, col) =>
+    int x1 = s.c2.barClose
+    int x2 = bar_index + 1
+    color eCol = s.ghost ? color.new(color.gray, 55) : col
+    color tCol = s.ghost ? color.new(color.gray, 65) : color.new(color.teal, 0)
+    color sCol = s.ghost ? color.new(color.gray, 65) : color.new(color.red, 0)
+    string eStyle = s.ghost ? line.style_dotted : line.style_solid
+    s.lnE := line.new(x1 = x1, y1 = s.entry, x2 = x2, y2 = s.entry,
+         xloc = xloc.bar_index, extend = extend.none, color = eCol,
+         style = eStyle, width = 2)
+    s.lnT := line.new(x1 = x1, y1 = s.tp, x2 = x2, y2 = s.tp,
+         xloc = xloc.bar_index, extend = extend.none, color = tCol,
+         style = line.style_solid, width = 1)
+    s.lnS := line.new(x1 = x1, y1 = s.sl, x2 = x2, y2 = s.sl,
+         xloc = xloc.bar_index, extend = extend.none, color = sCol,
+         style = line.style_dashed, width = 1)
+    if showC1Range
+        s.bxC1 := box.new(left = s.c1.barOpen, top = s.c1.h, right = x2,
+             bottom = s.c1.l, border_color = color.new(col, 75),
+             bgcolor = color.new(col, 93))
+    if showSweepMarkers
+        s.mk := label.new(x = s.c2.barClose, y = s.dir > 0 ? s.c2.l : s.c2.h,
+             text = "", xloc = xloc.bar_index, yloc = yloc.price,
+             color = color.new(color.gray, 55),
+             style = s.dir > 0 ? label.style_triangleup : label.style_triangledown,
+             size = size.tiny)
+    s.lbl := label.new(x = x2, y = s.entry, text = buildText(s),
+         xloc = xloc.bar_index, yloc = yloc.price,
+         color = s.ghost ? color.new(color.gray, 90) : color.new(col, 88),
+         style = label.style_label_left, textcolor = chart.fg_color,
+         size = labelSize)
+
+refreshSetup(s) =>
+    if s.state == "ARMED" or s.state == "TRIGGERED"
+        int x2 = bar_index + 1
+        line.set_x2(s.lnE, x2)
+        line.set_x2(s.lnT, x2)
+        line.set_x2(s.lnS, x2)
+        label.set_x(s.lbl, x2)
+        if not na(s.bxC1)
+            box.set_right(s.bxC1, x2)
+        if not na(s.bxR)
+            box.set_right(s.bxR, x2)
+        if not na(s.bxK)
+            box.set_right(s.bxK, x2)
+
+finalizeSetup(s) =>
+    int xr = na(s.resolveBar) ? bar_index : s.resolveBar
+    if not na(s.lnE)
+        line.set_x2(s.lnE, xr)
+        line.set_color(s.lnE, color.new(color.gray, 45))
+        line.set_style(s.lnE, line.style_dotted)
+    if not na(s.lnT)
+        line.set_x2(s.lnT, xr)
+        line.set_color(s.lnT, color.new(color.teal, 55))
+    if not na(s.lnS)
+        line.set_x2(s.lnS, xr)
+        line.set_color(s.lnS, color.new(color.red, 55))
+    if not na(s.bxC1)
+        box.set_right(s.bxC1, xr)
+    if not na(s.bxR)
+        box.set_right(s.bxR, xr)
+    if not na(s.bxK)
+        box.set_right(s.bxK, xr)
+    if not na(s.lbl)
+        label.set_x(s.lbl, xr + 1)
+        label.set_text(s.lbl, buildText(s))
+        label.set_color(s.lbl, color.new(color.gray, 92))
+
+deleteSetup(s) =>
+    if not na(s.lnE)
+        line.delete(s.lnE)
+    if not na(s.lnT)
+        line.delete(s.lnT)
+    if not na(s.lnS)
+        line.delete(s.lnS)
+    if not na(s.bxC1)
+        box.delete(s.bxC1)
+    if not na(s.bxR)
+        box.delete(s.bxR)
+    if not na(s.bxK)
+        box.delete(s.bxK)
+    if not na(s.lbl)
+        label.delete(s.lbl)
+    if not na(s.mk)
+        label.delete(s.mk)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  8. LIFECYCLE
+// ═════════════════════════════════════════════════════════════════════════════
+
+// One chart bar of price action against a single setup.
+stepSetup(s, bO, bH, bL, allow) =>
+    if s.state == "ARMED"
+        bool trig = (s.dir > 0 ? bH >= s.entry : bL <= s.entry) and (not triggerInSession or inSess)
+        bool sweepFail = s.dir > 0 ? bL < s.c2.l : bH > s.c2.h
+        if trig and not allow
+            s.state := "SKIPPED"
+            s.resolveBar := bar_index
+        else if trig
+            float fl = s.dir > 0 ? math.max(bO, s.entry) : math.min(bO, s.entry)
+            bool pastTp = s.dir > 0 ? fl >= s.tp : fl <= s.tp
+            if pastTp
+                s.state := "SKIPPED"
+                s.resolveBar := bar_index
+            else
+                s.state := "TRIGGERED"
+                s.fill := fl
+                s.triggerBar := bar_index
+        else if invalidateOnSweepBreak and sweepFail
+            s.state := "INVALIDATED"
+            s.resolveBar := bar_index
+    if s.state == "TRIGGERED"
+        bool tpHit = s.dir > 0 ? bH >= s.tp : bL <= s.tp
+        bool slHit = s.dir > 0 ? bL <= s.sl : bH >= s.sl
+        bool sameBar = s.triggerBar == bar_index
+        bool openBeyond = s.dir > 0 ? bO >= s.entry : bO <= s.entry
+        bool closeBeyondSl = s.dir > 0 ? close <= s.sl : close >= s.sl
+        if sameBar
+            // On the trigger bar, only events that are provably post-entry count:
+            // reaching TP always implies crossing the entry, a close beyond SL does
+            // too. A mere SL wick may predate the entry, so it is not resolved here.
+            if tpHit and slHit and openBeyond
+                s.state := ambiguousOutcome == "Win" ? "WIN" : ambiguousOutcome == "Unknown" ? "UNKNOWN" : "LOSS"
+                s.resolveBar := bar_index
+            else if tpHit
+                s.state := "WIN"
+                s.resolveBar := bar_index
+            else if slHit and (openBeyond or closeBeyondSl)
+                s.state := "LOSS"
+                s.resolveBar := bar_index
+        else
+            if tpHit and slHit
+                s.state := ambiguousOutcome == "Win" ? "WIN" : ambiguousOutcome == "Unknown" ? "UNKNOWN" : "LOSS"
+                s.resolveBar := bar_index
+            else if tpHit
+                s.state := "WIN"
+                s.resolveBar := bar_index
+            else if slHit
+                s.state := "LOSS"
+                s.resolveBar := bar_index
+
+// Step a setup, emit events for state changes, refresh drawings.
+advance(s, ctx, b) =>
+    bool allow = s.ghost or not (countMode == "Triggered" and ctx.cnt >= maxPerSession)
+    string prev = s.state
+    stepSetup(s, open, high, low, allow)
+    if prev == "ARMED" and not na(s.fill)
+        if not s.ghost
+            if countMode == "Triggered"
+                ctx.cnt := ctx.cnt + 1
+            array.push(b.trig, evMsg(s, "TRIGGERED"))
+            if showRiskBoxes
+                float topR = math.max(s.entry, s.tp)
+                float botR = math.min(s.entry, s.tp)
+                s.bxR := box.new(left = s.triggerBar, top = topR,
+                     right = bar_index + 1, bottom = botR,
+                     border_color = color.new(color.teal, 65),
+                     bgcolor = color.new(color.teal, 90))
+                float topK = math.max(s.entry, s.sl)
+                float botK = math.min(s.entry, s.sl)
+                s.bxK := box.new(left = s.triggerBar, top = topK,
+                     right = bar_index + 1, bottom = botK,
+                     border_color = color.new(color.red, 65),
+                     bgcolor = color.new(color.red, 90))
+        if isTerminal(s.state) and not s.ghost
+            array.push(b.res, evMsg(s, s.state))
+    else if prev == "ARMED" and isTerminal(s.state)
+        if not s.ghost
+            array.push(b.res, evMsg(s, s.state))
+    else if prev == "TRIGGERED" and isTerminal(s.state)
+        if not s.ghost
+            array.push(b.res, evMsg(s, s.state))
+    refreshSetup(s)
+
+stepActive(ctx, b) =>
+    if array.size(ctx.active) > 0
+        for i = array.size(ctx.active) - 1 to 0
+            Setup s = array.get(ctx.active, i)
+            advance(s, ctx, b)
+
+// Window for an ARMED setup has ended (a new HTF period just opened).
+expireStale(ctx, b) =>
+    if array.size(ctx.active) > 0
+        for i = array.size(ctx.active) - 1 to 0
+            Setup s = array.get(ctx.active, i)
+            if s.state == "ARMED"
+                s.periodsLeft := s.periodsLeft - 1
+                if s.periodsLeft <= 0
+                    s.state := "EXPIRED"
+                    s.resolveBar := bar_index
+                    if not s.ghost
+                        array.push(b.res, evMsg(s, "EXPIRED"))
+
+// C2 just closed: run the detector and arm / ghost the setup.
+armNew(ctx, biasDir, b) =>
+    if ctx.enabled
+        if not na(ctx.prev1)
+            if ctx.prev1.inSess and ctx.cnt < maxPerSession
+                Detection det = detectCRT(ctx.prev2, ctx.prev1)
+                ctx.lastReject := det.reason
+                if det.dir != 0
+                    bool neutralBlock = biasDir == 0 and neutralMode == "None" and biasMode != "Manual"
+                    bool ct = (biasDir != 0 and det.dir != biasDir) or neutralBlock
+                    bool ctBlock = ct and not showCounterTrend
+                    int cv = chopVerdict(ctx)
+                    bool chopGhost = cv == 1 and showChopGhosts
+                    bool chopBlock = cv == 2 or (cv == 1 and not showChopGhosts)
+                    string chopReason = "chop " + ctx.chopGrade + " (" + gradeName(ctx.chopGrade) + ")"
+                    if ctBlock or chopBlock
+                        ctx.lastReject := ctBlock and chopBlock ? "counter-trend + " + chopReason : ctBlock ? "counter-trend" : chopReason
+                    if not ctBlock and not chopBlock
+                        bool ghost = ct or chopGhost
+                        string gr = ct and chopGhost ? "counter-trend + " + chopReason : ct ? "counter-trend" : chopReason
+                        Setup s = Setup.new(tf = ctx.tfLabel, dir = det.dir,
+                             state = "ARMED", seq = ctx.cnt + 1, ghost = ghost,
+                             ghostReason = gr, chopGrade = ctx.chopGrade,
+                             chopScore = ctx.chopScore, c1 = ctx.prev2,
+                             c2 = ctx.prev1, entry = det.entry, tp = det.tp,
+                             sl = det.sl, risk = det.risk, reward = det.reward,
+                             armedBar = bar_index, periodsLeft = triggerWindowBars)
+                        array.push(ctx.active, s)
+                        if not ghost and countMode == "Armed"
+                            ctx.cnt := ctx.cnt + 1
+                        drawSetup(s, ctx.col)
+                        if not ghost
+                            array.push(b.arm, evMsg(s, "ARMED"))
+                        advance(s, ctx, b)
+
+flushTerminals(ctx) =>
+    if array.size(ctx.active) > 0
+        for i = array.size(ctx.active) - 1 to 0
+            Setup s = array.get(ctx.active, i)
+            if isTerminal(s.state)
+                finalizeSetup(s)
+                array.push(ctx.history, s)
+                array.remove(ctx.active, i)
+    int guard = 0
+    while array.size(ctx.history) > maxHistoryPerTf and guard < 100
+        deleteSetup(array.shift(ctx.history))
+        guard := guard + 1
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  9. DASHBOARD
+// ═════════════════════════════════════════════════════════════════════════════
+
+var table dash = na
+var bool dashInit = false
+if not dashInit
+    if dashPos == "Top left"
+        dash := table.new(position.top_left, 5, 9, bgcolor = color.new(color.gray, 90), border_width = 1, border_color = color.new(color.gray, 65))
+    else if dashPos == "Bottom right"
+        dash := table.new(position.bottom_right, 5, 9, bgcolor = color.new(color.gray, 90), border_width = 1, border_color = color.new(color.gray, 65))
+    else if dashPos == "Bottom left"
+        dash := table.new(position.bottom_left, 5, 9, bgcolor = color.new(color.gray, 90), border_width = 1, border_color = color.new(color.gray, 65))
+    else
+        dash := table.new(position.top_right, 5, 9, bgcolor = color.new(color.gray, 90), border_width = 1, border_color = color.new(color.gray, 65))
+    dashInit := true
+
+ctxStateText(ctx) =>
+    string out = "—"
+    if array.size(ctx.active) > 0
+        Setup s = array.get(ctx.active, array.size(ctx.active) - 1)
+        out := s.state + " " + (s.dir > 0 ? "L" : "S") + " " + str.tostring(s.entry, format.mintick)
+    out
+
+ctxLastText(ctx) =>
+    string out = "—"
+    if array.size(ctx.history) > 0
+        Setup s = array.get(ctx.history, array.size(ctx.history) - 1)
+        out := s.state + " " + (s.dir > 0 ? "L" : "S")
+    out
+
+cntText(ctx) =>
+    ctx.enabled ? str.tostring(ctx.cnt) + "/" + str.tostring(maxPerSession) : "off"
+
+chopText(ctx) =>
+    string out = "n/a"
+    if not na(ctx.chopScore)
+        out := ctx.chopGrade + " " + str.tostring(math.round(ctx.chopScore))
+    int v = chopVerdict(ctx)
+    if v == 1
+        out := out + " ~"
+    else if v == 2
+        out := out + " ×"
+    out
+
+chopBg(ctx) =>
+    color out = color.new(color.gray, 86)
+    if useChopFilter and not na(ctx.chopScore)
+        int v = chopVerdict(ctx)
+        out := v == 0 ? color.new(color.green, 86) : v == 1 ? color.new(color.yellow, 86) : color.new(color.red, 86)
+    out
+
+drawDashboard(biasDir) =>
+    string biasTxt = biasDir > 0 ? "BULL" : biasDir < 0 ? "BEAR" : "NEUTRAL"
+    color biasBg = biasDir > 0 ? color.new(color.green, 80) : biasDir < 0 ? color.new(color.red, 80) : color.new(color.gray, 80)
+    table.cell(dash, 0, 0, "CRT NITRO", text_color = chart.fg_color, text_size = dashSize, bgcolor = color.new(color.gray, 75), text_halign = text.align_center)
+    table.merge_cells(dash, 0, 0, 4, 0)
+    table.cell(dash, 0, 1, "1H bias", text_color = color.new(chart.fg_color, 35), text_size = dashSize)
+    table.cell(dash, 1, 1, biasTxt + "  (" + biasMode + ")", text_color = chart.fg_color, text_size = dashSize, bgcolor = biasBg, text_halign = text.align_center)
+    table.merge_cells(dash, 1, 1, 4, 1)
+    table.cell(dash, 0, 2, "Session", text_color = color.new(chart.fg_color, 35), text_size = dashSize)
+    table.cell(dash, 1, 2, (inSess ? "OPEN " : "CLOSED ") + sessStr, text_color = chart.fg_color, text_size = dashSize, text_halign = text.align_center)
+    table.merge_cells(dash, 1, 2, 4, 2)
+    table.cell(dash, 0, 3, "TF", text_color = color.new(chart.fg_color, 35), text_size = dashSize)
+    table.cell(dash, 1, 3, "Slots", text_color = color.new(chart.fg_color, 35), text_size = dashSize)
+    table.cell(dash, 2, 3, "Active", text_color = color.new(chart.fg_color, 35), text_size = dashSize)
+    table.cell(dash, 3, 3, "Chop", text_color = color.new(chart.fg_color, 35), text_size = dashSize)
+    table.cell(dash, 4, 3, "Last", text_color = color.new(chart.fg_color, 35), text_size = dashSize)
+    table.cell(dash, 0, 4, "15m", text_color = col15, text_size = dashSize)
+    table.cell(dash, 1, 4, cntText(c15), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 2, 4, ctxStateText(c15), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 3, 4, chopText(c15), text_color = chart.fg_color, text_size = dashSize, bgcolor = chopBg(c15), text_halign = text.align_center)
+    table.cell(dash, 4, 4, ctxLastText(c15), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 0, 5, "30m", text_color = col30, text_size = dashSize)
+    table.cell(dash, 1, 5, cntText(c30), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 2, 5, ctxStateText(c30), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 3, 5, chopText(c30), text_color = chart.fg_color, text_size = dashSize, bgcolor = chopBg(c30), text_halign = text.align_center)
+    table.cell(dash, 4, 5, ctxLastText(c30), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 0, 6, "1H", text_color = col60, text_size = dashSize)
+    table.cell(dash, 1, 6, cntText(c60), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 2, 6, ctxStateText(c60), text_color = chart.fg_color, text_size = dashSize)
+    table.cell(dash, 3, 6, chopText(c60), text_color = chart.fg_color, text_size = dashSize, bgcolor = chopBg(c60), text_halign = text.align_center)
+    table.cell(dash, 4, 6, ctxLastText(c60), text_color = chart.fg_color, text_size = dashSize)
+    string chopRule = useChopFilter ? "Chop " + str.tostring(chopLen) + " HTF · count ≤ " + chopCountMax + " · " + (showChopGhosts ? "fade" : "hide") + " between · skip ≥ " + chopSkipAt : "Chop filter off · " + str.tostring(chopLen) + " HTF lookback"
+    table.cell(dash, 0, 7, chopRule, text_color = color.new(chart.fg_color, 30), text_size = dashSize, text_halign = text.align_center)
+    table.merge_cells(dash, 0, 7, 4, 7)
+    string note = "chart " + timeframe.period
+    if chartSec == 900 and use15
+        note := "⚠ 15m triggers are same-bar on a 15m chart"
+    else if debugMode
+        note := "rej " + c15.lastReject + " | " + c30.lastReject + " | " + c60.lastReject
+    table.cell(dash, 0, 8, note, text_color = color.new(chart.fg_color, 30), text_size = dashSize)
+    table.merge_cells(dash, 0, 8, 4, 8)
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  10. MAIN LOOP
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── Chop threshold sanity ──────────────────────────────────────────────────
+if useChopFilter and gradeRank(chopSkipAt) <= gradeRank(chopCountMax)
+    runtime.error("CRT Nitro: 'Skip setups from grade' must be above 'Count setups up to grade'.")
+
+// ── Daily counter reset ─────────────────────────────────────────────────────
+if not na(dayKey) and (na(lastDayKey) or dayKey != lastDayKey)
+    lastDayKey := dayKey
+    c15.cnt := 0
+    c30.cnt := 0
+    c60.cnt := 0
+
+array.clear(buf.arm)
+array.clear(buf.trig)
+array.clear(buf.res)
+
+// ── Aggregate (60 first so the bias state is fresh for this bar) ────────────
+bool cl15 = aggregateTf(c15, inSess)
+bool cl30 = aggregateTf(c30, inSess)
+bool cl60 = aggregateTf(c60, inSess)
+
+// ── Chop grades from completed HTF candles ─────────────────────────────────
+if cl60
+    updateChop(c60)
+if cl30
+    updateChop(c30)
+if cl15
+    updateChop(c15)
+
+// ── 1H structure / bias ─────────────────────────────────────────────────────
+if cl60 and not na(c60.prev1)
+    array.push(h1Hi, c60.prev1.h)
+    array.push(h1Lo, c60.prev1.l)
+    float alpha = 2.0 / (emaLen + 1.0)
+    h1Ema := na(h1Ema) ? c60.prev1.c : alpha * c60.prev1.c + (1.0 - alpha) * h1Ema
+    if array.size(h1Hi) > 120
+        array.shift(h1Hi)
+        array.shift(h1Lo)
+    updatePivots(h1Hi, h1Lo, h1PH, h1PL, pivotLen)
+
+int biasDir = 0
+if biasMode == "Auto 1H structure"
+    if array.size(h1PH) >= 2 and array.size(h1PL) >= 2
+        float phLast = array.get(h1PH, array.size(h1PH) - 1)
+        float phPrev = array.get(h1PH, array.size(h1PH) - 2)
+        float plLast = array.get(h1PL, array.size(h1PL) - 1)
+        float plPrev = array.get(h1PL, array.size(h1PL) - 2)
+        if phLast > phPrev and plLast > plPrev
+            biasDir := 1
+        else if phLast < phPrev and plLast < plPrev
+            biasDir := -1
+else if biasMode == "EMA 1H"
+    if not na(h1Ema) and not na(c60.prev1)
+        biasDir := c60.prev1.c > h1Ema ? 1 : -1
+else
+    biasDir := manualBias == "Long" ? 1 : manualBias == "Short" ? -1 : 0
+
+// ── Expire setups whose trigger window closed on this bar ──────────────────
+if cl60 and c60.enabled
+    expireStale(c60, buf)
+if cl30 and c30.enabled
+    expireStale(c30, buf)
+if cl15 and c15.enabled
+    expireStale(c15, buf)
+
+// ── Step live setups against this chart bar ────────────────────────────────
+stepActive(c15, buf)
+stepActive(c30, buf)
+stepActive(c60, buf)
+
+// ── Arm new setups on HTF closes ───────────────────────────────────────────
+if cl60
+    armNew(c60, biasDir, buf)
+if cl30
+    armNew(c30, biasDir, buf)
+if cl15
+    armNew(c15, biasDir, buf)
+
+// ── Housekeeping ───────────────────────────────────────────────────────────
+flushTerminals(c15)
+flushTerminals(c30)
+flushTerminals(c60)
+
+if barstate.islast and showDashboard
+    drawDashboard(biasDir)
+
+// ── Alerts ─────────────────────────────────────────────────────────────────
+joinMsgs(arr) =>
+    string out = ""
+    if array.size(arr) > 0
+        for i = 0 to array.size(arr) - 1
+            out := out + (i > 0 ? "\n" : "") + array.get(arr, i)
+    out
+
+if alertArm and array.size(buf.arm) > 0
+    alert(joinMsgs(buf.arm), alert.freq_once_per_bar)
+if alertTrig and array.size(buf.trig) > 0
+    alert(joinMsgs(buf.trig), alert.freq_once_per_bar)
+if alertRes and array.size(buf.res) > 0
+    alert(joinMsgs(buf.res), alert.freq_once_per_bar)
+
+alertcondition(array.size(buf.arm) > 0, "CRT armed", "A CRT setup armed")
+alertcondition(array.size(buf.trig) > 0, "CRT triggered", "A CRT entry triggered")

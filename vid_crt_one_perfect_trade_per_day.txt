@@ -1,0 +1,579 @@
+# YouTube transcript: CRT - taking one perfect trade per day (step-by-step breakdown)
+# Source: https://www.youtube.com/watch?v=UBvfsImdI2U
+# Duration: 17:25   Segments: 574   Chars: 23920
+# Format: [mm:ss] timestamped segments, verbatim captions
+
+0:00 In today's video, we're going to be
+0:01 covering one of the most perfect trade
+0:02 setups that you can find in the market
+0:04 literally every single day. Now, this is
+0:05 a strategy that I've perfected for years
+0:07 and it's so simple that even if you want
+0:08 to mess it up, you couldn't. So, I'll be
+0:10 giving you guys a full breakdown of the
+0:11 strategy step-by-step and showing you
+0:13 guys how you can just take this one
+0:14 trade every single day and that's all
+0:16 you guys need. All of that being said,
+0:17 ladies and gentlemen, let's get directly
+0:18 into the video. Let's explain the entire
+0:20 concept and understand how you can apply
+0:22 this to your own trading literally right
+0:23 now. So, ladies and gentlemen, let's
+0:24 take a look at this concept, understand
+0:26 how you can identify that one perfect
+0:28 trade and understand what goes into this
+0:30 setup so you guys really know what
+0:32 you're even trading. Now, you guys have
+0:33 probably seen this concept before. I've
+0:34 made like at least 100 videos on it
+0:36 across like all my social medias, but
+0:39 today I don't want to focus on just
+0:40 mainly the strategy and that's it,
+0:41 right? I want to focus on the strategy,
+0:43 but also figuring out how do we take
+0:45 that one perfect CRT a day, close our
+0:47 computer, and just win. That's it.
+0:48 Because what I have seen a lot of people
+0:50 been doing recently is you guys will see
+0:52 like 50 CRTs form a day, you'll fire at
+0:54 every single one, and you're just a mess
+0:56 in your trading, right? You're just
+0:57 taking everything you see, when in
+0:59 reality to be that one perfect trade in
+1:01 the morning, take that, and you're done.
+1:02 That's it. Just print. So, before we do
+1:03 take a look at all those examples and
+1:05 all that stuff, let's really break down
+1:06 the strategy one more time because a lot
+1:08 of you guys are also marking the
+1:09 strategy out incorrectly and you're
+1:11 taking these random setups. So, I want
+1:12 to clear up that confusion. I really do
+1:14 want to kind of run down the strategy
+1:16 one more time and understand everything
+1:18 that goes into it. So, candle range
+1:19 theory, also known as CRT, is a very,
+1:22 very simple concept. And all you're
+1:23 really going to be doing is you're going
+1:24 to be using one of these three time
+1:26 frames, that 1-hour, 30-minute, or
+1:28 15-minute. A lot of people also got
+1:29 confused on this part. They're like,
+1:31 "Well, which one can I use?" Honestly,
+1:33 it doesn't matter. I will say most of
+1:35 the time that the highest quality setups
+1:37 are on the hourly, and the 15-minute is
+1:39 just the one that shows up more often.
+1:40 So, if you really want to wait for the
+1:42 hourly ones, go ahead. 15-minute's going
+1:44 to be more frequent, so you'll find more
+1:46 setups on there, and 30's kind of in the
+1:48 middle. So, simply all you're going to
+1:49 do is you are going to go, let's say, on
+1:51 the 1-hour time frame, and you will mark
+1:53 out the most previous candle's high and
+1:55 the most previous candle's low. And this
+1:57 does include the wick. A lot of people
+1:58 are marking out the body. I have no idea
+2:00 where you guys got that idea from. I've
+2:02 never talked about it. But you will mark
+2:03 that most recent candles high and that
+2:05 most recent candles low. Next, what you
+2:07 will do is you will wait for price to
+2:09 come break either that high or the low.
+2:12 And you will wait for the actual colored
+2:14 part of the candle to close back inside
+2:16 that range. All right? So, in this case,
+2:18 it breaks that high.
+2:19 We reverse back down and the actual
+2:21 candle closes underneath the high once
+2:23 again. In this case, we broke that low.
+2:26 We reversed back up and we closed back
+2:28 inside that range. So, that is why it is
+2:30 known as candle range theory. We're
+2:32 closing back inside that range and the
+2:34 entire movement is happening within this
+2:36 candle itself. So, that was step number
+2:37 one. Just simply mark out your levels.
+2:39 Step number two is wait for a break and
+2:42 price must reverse. I really want to put
+2:44 a lot of emphasis on this because if it
+2:45 doesn't reverse, the strategy is not
+2:47 going to work. It must reverse right
+2:49 after breaking a high or a low. It
+2:51 doesn't matter which one. Now, step
+2:52 number three for CRT to work, ladies and
+2:54 gentlemen, the third candle will come in
+2:56 and it will make a complete U-shaped
+2:58 reversal to the opposite end that was
+3:00 broken. All right? So, if we took out
+3:02 this high, that means that price wants
+3:04 to come and make a full reversal all the
+3:06 way down to this low. Same exact thing
+3:08 goes for this end. We break the low, it
+3:10 is going to make a full U-shaped
+3:12 reversal all the way up to this candle's
+3:14 high. So, again, from one range to the
+3:17 other range is exactly how CRT works.
+3:19 And you guys can go ahead and take a
+3:21 look on the charts and you're about to
+3:22 see when we do that backtesting session.
+3:24 But this setup quite literally like 70
+3:26 to 80% of the time it hits almost every
+3:28 single time. That was step number three,
+3:30 but there's something for step number
+3:31 three that's super important. All right?
+3:33 You're also going to mark out the second
+3:35 candle, the one that broke and reversed.
+3:37 You are going to mark out the high of
+3:39 that candle or the low if it's going to
+3:40 be at the opposite end. And the only
+3:42 time we're entering is whenever this
+3:44 third candle is forming, we drop down to
+3:47 a lower time frame like the one or two
+3:48 minute. I personally use the one minute
+3:50 myself. Some people like two minute. And
+3:52 you will wait for price to come and
+3:54 break this middle candle's high on the
+3:56 lower time frame, and that is when your
+3:57 entry is taken. Or you will wait on the
+4:00 one opposite end right here for that
+4:01 middle candle's low, and that's where
+4:03 your entry will be taken. So, in very
+4:05 simple terms, ladies and gentlemen, this
+4:06 is a three candle sequence. You have
+4:08 candle number one where we just simply
+4:09 mark out the high and the low, including
+4:12 the wicks, not just the body, ladies and
+4:13 gentlemen. And candle number two will be
+4:15 the one that comes and breaks and
+4:17 immediately reverses.
+4:19 And candle number three is going to be
+4:20 the actual follow-through where price
+4:22 will go from one end of the range all
+4:24 the way back up to the opposite end of
+4:25 the range. So, it wants to come and
+4:27 exactly hit this high right here. That
+4:29 is exactly why it's called candle range
+4:30 theory. We are trading from one range of
+4:32 the candle to the other one. So, real
+4:34 quick, why does this strategy even work?
+4:36 What is the reasoning behind this? The
+4:38 market literally is trading from orders
+4:40 to orders, right? Liquidity, as some
+4:42 people call it, but all it is the market
+4:44 wants to come and pick up these orders
+4:45 that are sitting at the 1-hour highs.
+4:48 And who are we going to sell to, ladies
+4:49 and gentlemen? Okay, we picked up all
+4:51 those sell orders, but someone's got to
+4:52 buy them back up. Where are the buyers
+4:54 sitting, ladies and gentlemen? At these
+4:56 extreme highs and lows, right? Extreme
+4:58 highs and lows. So, whenever we pick up
+5:00 those sell orders, we need to come and
+5:02 deliver this. Think about it as if
+5:03 you're a mailman. You come and you pick
+5:05 up your orders, you got to deliver to
+5:07 somebody, right? The orders are sitting
+5:09 there. You No one's over here, so why am
+5:11 I going to stop here? No, price wants to
+5:12 make a full full move to its
+5:15 destination, and that is exactly why
+5:17 candle range theory works. All right?
+5:19 You come, you pick up your orders from
+5:20 the buyers, ladies and gentlemen. Price
+5:22 shows its strength, and it wants to go
+5:24 back and deliver to sellers at this high
+5:26 right here. Insanely simple concept.
+5:28 You're about to see the fact that we
+5:29 take a look at a few examples, and it'll
+5:31 be very very easy for you to understand.
+5:32 Now, for your actual entry, ladies and
+5:34 gentlemen, how do you know where to
+5:35 place stop loss and all this stuff like
+5:37 that? So, when you take your entry on
+5:39 the break of that middle candle, all
+5:40 right? The first thing you will do is
+5:42 you will drag your TP to that candle's
+5:45 high, because that is where we know that
+5:46 price wants to make a move. We know that
+5:48 price is looking to go from one end to
+5:50 the other, so I will drag my TP there.
+5:52 For your stop loss, ladies and
+5:53 gentlemen, you want to target a 1.5 to 2
+5:56 R for every single trade. So, what I
+5:58 will do is I will drag up my stop loss,
+6:01 right? Because we already have our TP
+6:02 figured out. I'm dragging up my stop
+6:04 loss until my risk reward becomes 1.5.
+6:08 And that is exactly how your trade is
+6:09 going to look. And you will see this in
+6:11 real time whenever I take it, you will
+6:12 understand exactly how that looks. One
+6:14 other piece of this, this literally
+6:16 works for all sessions, it works for
+6:17 everything, but the best possible setup
+6:20 is going to be in the New York session.
+6:22 So, 9:30 a.m. Eastern time is where we
+6:24 start looking for the setup, and if I
+6:26 don't find a setup before like 12:00 or
+6:28 1:00 p.m. Eastern time, honestly, just
+6:30 close the screens and just log off.
+6:31 Really simple stuff. There isn't really
+6:32 anything crazy on this, but now what we
+6:34 have to do, ladies and gentlemen, is go
+6:35 ahead to the charts and take a look at
+6:37 exactly what this looks like when you're
+6:39 trading every single morning and how you
+6:41 guys can identify, execute on it, and
+6:43 really just print day after day. So,
+6:44 let's head over there, take a look how
+6:46 this works, and see how that all is. In
+6:47 this example, ladies and gentlemen,
+6:49 we're going to run through a few days
+6:50 worth of data on MNQ. All right, this is
+6:52 a random day we've chosen, which is May
+6:54 5th on 2026, all right? So, if you guys
+6:58 want to go back later and take a look at
+6:59 this yourself, we will kind of
+7:01 you're all welcome to do that.
+7:03 So, what I'm going to do, ladies and
+7:04 gentlemen, is wait for 9:30 a.m. market
+7:07 open, and that is right there.
+7:09 I'm watching these candles form in that
+7:12 exact moment and trying to see
+7:15 which time frame gives me a CRT first,
+7:16 15, 30, or 1. So, I'm just watching, I'm
+7:18 watching, I'm watching until I get a CRT
+7:20 somewhere.
+7:21 So far, I have not seen a single CRT.
+7:24 So, I'm watching, I'm watching, I'm
+7:26 watching, I'm watching. I still do not
+7:28 see anything of interest.
+7:30 Still nothing, ladies and gentlemen.
+7:32 Still waiting, still waiting.
+7:35 This could be one that's forming right
+7:36 here. Let's see.
+7:40 Let's see. So far, nothing, ladies and
+7:42 gentlemen. Still waiting.
+7:44 You got to really It's It's a waiting
+7:45 game, genuinely. It's a waiting game.
+7:47 All right?
+7:49 Okay.
+7:50 So, one thing before we even say this,
+7:51 this is something I was about to forget
+7:52 to say.
+7:53 How do I know to play a bearish CRT or a
+7:56 long CRT?
+7:58 Go ahead overall, just quick take a look
+8:00 at the overall market trend. You can see
+8:02 right now that if I take a look at MNQ,
+8:05 we are on a tear. It's a clear uptrend.
+8:07 The market's on fire. It's just ripping
+8:09 higher highs, higher lows every single
+8:11 time. So, forget shorts. I am not in
+8:14 shorts at all. I don't even care to look
+8:15 for shorts at this moment. All right?
+8:17 And most of the time on something like
+8:19 MNQ, you will be playing longs because
+8:21 the market is overall usually in an
+8:22 uptrend. And when it's in a downtrend,
+8:24 it will be very clear as well. And I
+8:25 will show you guys all that in a second.
+8:27 All right? But if you do go on the
+8:29 1-hour time frame for a bare example
+8:32 right here,
+8:33 very clearly I can see MNQ is just
+8:36 ripping. Every single time make new
+8:38 highs, new highs, new highs, new highs,
+8:39 new lows every single time that are
+8:41 higher every single time.
+8:42 So, it's an uptrend. I am not going
+8:44 against that. It's like trying to run
+8:46 against the speeding train at that
+8:48 point. All right? I do not care to do
+8:49 that. So, that is exactly how you
+8:52 identify which CRT you will play.
+8:55 So, right now we do have a CRT that
+8:56 looks like forming right over here. I
+8:58 will wait it out and see if it actually
+8:59 gives me that setup right there.
+9:03 Let's see.
+9:06 Let's see. Let's see. Give it a second.
+9:08 There we go. So, this is a CRT. Number
+9:10 one, it goes with that overall bullish
+9:12 trend.
+9:13 Everything else aligns perfectly. So,
+9:15 what do we have here, ladies and
+9:16 gentlemen? We have candle low and candle
+9:18 high on the most previous candle. Right
+9:21 over here.
+9:22 What price did is notice exactly what I
+9:24 was just talking about. Price came and
+9:26 took out this low and reversed right
+9:28 back up and closed back inside the
+9:30 range. Right over here, price came here,
+9:32 broke, and immediately closed back in
+9:33 that range. So, that is exactly what CRT
+9:35 is. The last thing we understand now is
+9:38 that price will try to make a full
+9:40 U-shaped reversal to this high of day
+9:42 level right over here.
+9:44 Okay, since we took out the low, it
+9:45 wants to move to the opposite end.
+9:47 So, what I will do, ladies and
+9:48 gentlemen, is I will wait for price to
+9:50 break this middle candle right over
+9:52 here.
+9:53 This one right here.
+9:55 And that is when my entry will be taken.
+9:57 Okay, so on the 1-minute time frame,
+9:59 price essentially will need to break
+10:00 right over here.
+10:02 Okay, let me drag that down perfectly.
+10:04 And that is where my entry will be taken
+10:06 for this trade. Okay?
+10:08 So, essentially trade will look like
+10:10 this. I know where my take profit is
+10:12 right over here.
+10:13 So, the stop loss, I will drag that up
+10:15 to make it 1.5, exactly 1.5 right here.
+10:18 And that is all I need for my trade.
+10:20 That is it, ladies and gentlemen.
+10:22 So, let's see. I'm going to wait. I'm
+10:23 going to see if price actually breaks
+10:24 that middle candle, and that's the only
+10:26 time I'm taking that trade. If it
+10:27 doesn't break the middle candle,
+10:29 absolutely nothing will be done.
+10:31 All right, so let's see.
+10:33 Price got that break. Obviously, I had
+10:35 to enter a little bit late because we
+10:36 are on bar replay.
+10:38 But essentially, you will drag down your
+10:40 stop loss.
+10:41 You'll drag up your TP. Obviously again,
+10:44 these numbers are completely off because
+10:45 we are on bar replay. So, your entry
+10:47 will essentially be right over here.
+10:49 Okay?
+10:50 And you are now going to do absolutely
+10:52 nothing but let the trade ride either to
+10:55 stop loss or to take profit, ladies and
+10:56 gentlemen. And you are doing nothing
+10:58 else.
+10:59 Okay?
+11:01 So, let's see. Let's see. Let's see.
+11:02 There you go.
+11:04 That's all it was for the CRT. That's
+11:06 literally all it takes. So, that's it.
+11:08 You took the first CRT that formed with
+11:10 the trend in the New York session.
+11:12 That's it. No stop loss. No take profit.
+11:15 It's all It's hitting one of the two,
+11:16 and that's it. I really don't care what
+11:17 else you're seeing on that trade. Let's
+11:18 continue into the next day. So, let's
+11:19 play this out. Let's go over to the next
+11:21 day on MNQ.
+11:26 So, ladies and gentlemen, here we are on
+11:27 the next day now, and all I'm really
+11:29 going to do is that exact same process
+11:31 over and over and over again.
+11:34 We're still in an uptrend. I do not care
+11:36 for any shorts. I really do not care if
+11:38 I see a setup that forms that CRT to the
+11:40 downside. Only looking for upside. I'm
+11:42 looking for the first CRT that forms and
+11:45 that is it. I really don't care about
+11:46 anything else. All right? So, let's go
+11:48 through step by step, ladies and
+11:49 gentlemen. I'm waiting. I'm waiting. I'm
+11:51 watching to see if any CRTs form at all.
+11:54 All right, so far I'm not seeing
+11:55 anything. Let's see.
+11:57 Hourly candle just closed and this is a
+11:59 wonderful CRT right here. So, let's
+12:01 really break this down.
+12:02 You have your candle low right here.
+12:05 Okay?
+12:06 Price came and broke that low and
+12:08 immediately reversed back up. The actual
+12:10 colored part of the can- the candle
+12:11 closed back inside the range. All right?
+12:14 Now, what do we know is going to happen
+12:16 next? I know that the price wants to
+12:18 move to the opposite end of this candle.
+12:21 So, what I will essentially do, I will
+12:22 mark out this middle candle's high right
+12:25 over here, which is right about there.
+12:28 Okay? Right exactly there.
+12:30 And when price breaks that, ladies and
+12:32 gentlemen, I will set my take profit, my
+12:34 stop loss. I already know what those are
+12:35 going to be.
+12:37 And I will enter my trade. Okay?
+12:39 That is all I'm doing. There is not too
+12:42 much that goes into this, guys. I'm
+12:43 really just looking, looking, looking.
+12:46 Here we go. Let's see if price can come
+12:47 and break that high.
+12:49 So far has not done anything. Still
+12:50 waiting, still waiting, still waiting.
+12:53 Still waiting, guys. It's coming up for
+12:56 the break. Let's see. There we go. So,
+12:58 essentially, take your entry.
+13:00 Again, it's a little bit off because we
+13:02 are on bar replay.
+13:04 But, here's where your trade will look
+13:05 like. Okay? Your entry on the break of
+13:08 that middle candle. Now, I look for
+13:10 price to move to this high or hit my
+13:12 stop loss. That's all I really care
+13:13 about. So, let's continue and see what
+13:14 happens in this exact situation. All
+13:17 right?
+13:18 Price continues. Boom. Straight to TP.
+13:21 First CRT of the day.
+13:23 Boom. Smack that and you're done. Okay?
+13:26 Again, I'm going to run you guys through
+13:27 a few more. Like every single one you're
+13:29 seeing the same thing. And do not just
+13:30 take my word for it, guys. I want you to
+13:31 genuinely go on the charts after this.
+13:33 Not just because a very handsome young
+13:35 man named Nitro Trades is showing you
+13:36 this. I want you to actually test this
+13:38 out yourself. I want you to go and look
+13:39 and be like, "Damn, this guy's right."
+13:40 Now, for this next example, I want to
+13:41 run you guys through a situation where,
+13:43 you know, the trend has shifted. All
+13:45 right? And I really want to kind of
+13:47 break down this is a trade that I
+13:48 actually took today in the call itself.
+13:51 And this is how I knew that the trend
+13:52 had shifted. So, overall, we've been in
+13:54 a bullish uptrend. The market's been on
+13:55 fire. Everything's been respecting. But
+13:57 what happened with MES now? Okay? We
+13:59 came, we broke the previous lows of the
+14:01 higher time frame, the 1-hour. Correct?
+14:04 So, we've shifted to downtrend now.
+14:06 Every single time, what is the market
+14:07 doing now? We're making lower highs. The
+14:10 market was never doing this before. It
+14:11 was never making lower highs every
+14:13 single time. It was never doing that.
+14:15 Now, it's making lower highs every damn
+14:17 time we come across. Right?
+14:19 So,
+14:20 we keep going, we keep going, we keep
+14:21 going like this. Okay?
+14:24 And
+14:25 that is how I know that the trend has
+14:26 shifted. No other time before that was
+14:28 that happening.
+14:29 Before that, the market was just going
+14:31 highs every single time. Newer highs,
+14:33 newer highs, higher highs every single
+14:35 time. So, that is why today I had
+14:37 shifted my bias to the downside. Okay?
+14:41 So, let's really go ahead and take a
+14:42 look at how a shifted bias uh CRT will
+14:46 look. So, let's really run through that
+14:48 A through Z and see what I saw on my
+14:49 trade today. Okay?
+14:51 So, there was this bullish CRT in the
+14:52 morning. I didn't really care to play
+14:54 that. I'll be totally honest with you
+14:55 guys.
+14:56 I watched, I watched, I watched as this
+14:58 setup was forming.
+14:59 And let's see what happened, right? So,
+15:02 price forms that CRT. What exactly just
+15:04 happened here?
+15:05 Price came. Overall, I do understand
+15:07 that we have a little bit of a bearish
+15:08 trend.
+15:09 So, I mark out candle high right here.
+15:12 So, it broke it, reversed back in the
+15:14 range, the colored part of the candle
+15:15 closed back inside it. And I know it now
+15:18 wants to make a move to the opposite end
+15:19 of the candle.
+15:21 So, middle candle will break, and that
+15:23 is where my entry will be taken. And
+15:25 that is exactly what I'm looking for.
+15:27 That's it.
+15:28 Draw out your risk reward tool, drag it
+15:30 out to make it 1.5.
+15:32 And that is your entry. So, once the
+15:34 middle candle breaks now,
+15:36 that is where my entry will be taken.
+15:37 So, right here broke. Okay, let me
+15:39 actually go back one candle so we can
+15:40 get a little bit of an accurate entry.
+15:43 So, drag your TP right here.
+15:46 And drag your stop loss. Boom.
+15:48 And now you let your trade ride.
+15:50 I do not care about anything else.
+15:52 Wonderful. Let's let that ride out, do
+15:54 its thing.
+15:56 And boom.
+15:57 Straight shot for TP. That is the first
+15:59 CRT of the day that goes with the trend.
+16:00 Wonderful. Bag that and that is it. This
+16:03 is where people do get a little bit
+16:04 confused cuz they don't know if the
+16:05 actual trend has shifted, but it's a
+16:07 pretty simple concept. Doesn't really
+16:08 have too much that goes into it. Just
+16:09 don't overcomplicate it. Look at the
+16:11 1-hour chart. If you see some crazy
+16:13 crazy like uptrend, don't go against
+16:15 that. Like don't do it, please. If you
+16:17 see the market has been recently making
+16:19 lower highs every single time, then you
+16:21 know, it's kind of shifted a little bit.
+16:22 I want you guys to take everything I
+16:23 just showed you, the concept, the
+16:25 understanding of the trend, and overall
+16:27 just understanding the first CRT. So,
+16:29 you'll take this trade and you will call
+16:30 it. And just watch how much your trading
+16:32 changes. Okay? Again, you don't have to
+16:34 just take my word for it. Go test it.
+16:36 You can literally go in the live market
+16:37 tomorrow, test out the strategy for a
+16:39 week, a month, do whatever you want, and
+16:41 you will see that literally no strategy
+16:43 on this planet does even come close to
+16:44 this. So, ladies and gentlemen, I really
+16:46 hope you guys enjoyed this video. If you
+16:48 guys have any questions or anything like
+16:49 that, hop in the Discord. It's free. You
+16:51 guys can just hop in and talk 24/7 with
+16:53 me and all the other members that are
+16:55 trading the exact same setup as you. And
+16:56 if you guys do have any questions, I
+16:57 mean, feel free to drop them in the
+16:58 comment section below, and I will try to
+17:00 get back to you guys as soon as
+17:01 possible. And also, drop any videos you
+17:03 guys want to see me make in the future.
+17:05 I'll get to those as well. But again,
+17:06 thank you guys so much for watching the
+17:07 video. Obviously, I love making these
+17:09 videos, but just knowing that it's
+17:10 helping you guys out motivates me so
+17:11 much more to be up at currently like
+17:13 what, 5, 6 a.m. in Dubai right now
+17:15 making these videos for you guys. So,
+17:17 hopefully you guys enjoyed. Take care. I
+17:19 will see you guys back in the next one
+17:20 and I wish you guys good luck with the
+17:21 strategy. Hopefully I can help you guys
+17:23 out a little
