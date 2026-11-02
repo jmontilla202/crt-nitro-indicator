@@ -1,0 +1,2045 @@
+
+//@version=6
+// Version: 0.9.0-alpha.1
+// Pre-release / unstable. Verification remains incomplete.
+// Adds the prop-eval risk governor (50k size, PT 3k, DD 2k, EOD, DLL $300).
+// All governor values are REFERENCE accounting seeded at the account size:
+// reference equity = account size + cumulative net reference P&L. They are
+// never broker P&L and never an order instruction.
+// - Daily-loss lockout: day-to-date reference P&L <= -DLL blocks all new
+//   candidates for the remainder of the trading day; existing references
+//   keep being monitored. Takes precedence over directional quotas.
+// - Floor: max(peak EOD reference equity - DD, size - DD); a signal whose
+//   reserved risk would breach the floor is blocked.
+// - Profit-target progress; optional stop-arming once PT is reached.
+// - Reserved-risk budget = min(DLL headroom, floor headroom, budget, clamped
+//   to the daily loss limit).
+// Adds the outcome ledger, lifecycle alerts and the 1H bias filter (OFF by
+// default); per-direction reference concurrency; 5m = chop diagnostics only.
+// No broker fills, position tracking or win-rate claims.
+// Retains cellText / labelText parameter names.
+
+indicator("CRT Nitro v0.9.0-alpha.1 [Prop-Eval Governor]",
+     overlay = true, max_bars_back = 200,
+     max_lines_count = 24, max_labels_count = 24)
+
+// ============================================================================
+// CHOP AND DASHBOARD INPUTS
+// ============================================================================
+string GROUP_CHOP = "Chop Calculation"
+int lookback = input.int(20, "Lookback candles",
+     minval = 10, maxval = 50, group = GROUP_CHOP)
+float bodyThreshold = input.float(0.7, "Large body / ATR threshold",
+     minval = 0.1, step = 0.1, group = GROUP_CHOP)
+float wickThreshold = input.float(0.6, "Combined wicks / range threshold",
+     minval = 0.1, maxval = 0.95, step = 0.05, group = GROUP_CHOP)
+
+string GROUP_LOG = "Chop History"
+int requestedMinutes = input.int(15, "Requested logging interval — minutes",
+     minval = 5, maxval = 240, step = 5, group = GROUP_LOG)
+float changeTolerance = input.float(2.0, "Constant-band tolerance — score points",
+     minval = 0, step = 0.5, group = GROUP_LOG)
+int historyRows = input.int(8, "History rows",
+     minval = 3, maxval = 15, group = GROUP_LOG)
+string logTimezone = input.string("America/New_York", "Timestamp timezone",
+     group = GROUP_LOG)
+
+string GROUP_TABLE = "Dashboard"
+string positionInput = input.string("Top Right", "Position",
+     options = ["Top Left", "Top Right", "Middle Right",
+     "Bottom Left", "Bottom Right"], group = GROUP_TABLE)
+string sizeInput = input.string("Small", "Font size",
+     options = ["Tiny", "Small", "Normal", "Large"], group = GROUP_TABLE)
+
+// ============================================================================
+// CRT INPUTS
+// ============================================================================
+string GROUP_CRT = "CRT Engine"
+string crtModeInput = input.string("Direct close", "Entry mode",
+     options = ["Direct close", "Re-break", "Auto (chop-based)"],
+     group = GROUP_CRT)
+int crtMaxBars = input.int(3, "Candles after C2 allowed for entry",
+     minval = 1, maxval = 5, group = GROUP_CRT)
+float crtAutoThreshold = input.float(15.0,
+     "Auto mode: select Re-break at or above this chop score",
+     minval = 0, maxval = 60, step = 1, group = GROUP_CRT)
+string crtMinGradeInput = input.string("B", "Minimum chop grade for entry",
+     options = ["A", "B"], group = GROUP_CRT)
+int crtPullbackTicks = input.int(2, "Re-break: pullback CLOSE beyond level — ticks",
+     minval = 1, group = GROUP_CRT)
+int crtStopTicks = input.int(2, "Structural stop buffer — ticks",
+     minval = 1, group = GROUP_CRT)
+bool crtPause = input.bool(false, "Pause new CRT sequences", group = GROUP_CRT)
+bool crtShowMarkers = input.bool(true, "Show qualified entry markers",
+     group = GROUP_CRT)
+
+string GROUP_CRT_SESSION = "CRT Sessions — New York time"
+bool crtUseSessions = input.bool(true, "Restrict CRT engine to selected sessions",
+     group = GROUP_CRT_SESSION)
+string crtSessionMode = input.string("Snap to chart candles",
+     "Session boundary handling",
+     options = ["Snap to chart candles", "Strict (candle fully inside)"],
+     group = GROUP_CRT_SESSION)
+bool crtEnableNY = input.bool(true, "Enable New York", group = GROUP_CRT_SESSION)
+string crtNYHours = input.session("0930-1600", "New York hours (RTH default)",
+     group = GROUP_CRT_SESSION)
+bool crtEnableAsia = input.bool(false, "Enable Asia", group = GROUP_CRT_SESSION)
+string crtAsiaHours = input.session("2000-2200", "Asia hours",
+     group = GROUP_CRT_SESSION)
+bool crtEnableLondon = input.bool(false, "Enable London", group = GROUP_CRT_SESSION)
+string crtLondonHours = input.session("0300-0500", "London hours",
+     group = GROUP_CRT_SESSION)
+
+string GROUP_CRT_LIMITS = "CRT Daily Signal Limits"
+int crtMaxLongs = input.int(2, "Maximum qualified LONG signals / trading day",
+     minval = 1, maxval = 5, group = GROUP_CRT_LIMITS)
+int crtMaxShorts = input.int(2, "Maximum qualified SHORT signals / trading day",
+     minval = 1, maxval = 5, group = GROUP_CRT_LIMITS)
+int crtMaxTotal = input.int(3, "Maximum combined signals / trading day",
+     minval = 1, maxval = 10, group = GROUP_CRT_LIMITS)
+int crtMaxConcurrent = input.int(2, "Maximum concurrent references",
+     minval = 1, maxval = 2, group = GROUP_CRT_LIMITS,
+     tooltip = "1 = single reference (0.5.x behaviour); 2 = one LONG and one SHORT may be active at once.")
+
+// ============================================================================
+// RISK INPUTS
+// ============================================================================
+string GROUP_RISK = "CRT Estimated Risk — USD"
+string crtSizingMode = input.string("Micro equivalent", "Sizing instrument",
+     options = ["Micro equivalent", "Chart contract", "Custom point value"],
+     group = GROUP_RISK)
+float crtCustomPointValue = input.float(2.0,
+     "Custom USD per full price point / contract",
+     minval = 0.01, step = 0.25, group = GROUP_RISK)
+float crtMaxRisk = input.float(150.0, "Maximum estimated risk / signal",
+     minval = 1, step = 10, group = GROUP_RISK)
+float crtDailyBudget = input.float(300.0,
+     "Daily reserved signal-risk budget (clamped to DLL)",
+     minval = 1, step = 25, group = GROUP_RISK)
+int crtMaxContracts = input.int(5, "Maximum contracts / signal",
+     minval = 1, maxval = 100, group = GROUP_RISK)
+float crtMinRR = input.float(1.5, "Minimum gross reward / risk",
+     minval = 0.1, step = 0.1, group = GROUP_RISK)
+float crtCostAllowance = input.float(3.0,
+     "Estimated round-trip costs + slippage / contract",
+     minval = 0, step = 0.25, group = GROUP_RISK)
+
+// ============================================================================
+// REFERENCE LIFECYCLE INPUTS
+// Lifecycle observations do not represent actual trade executions.
+// ============================================================================
+string GROUP_LIFECYCLE = "CRT Reference Lifecycle"
+int crtPlanMaxBars = input.int(12,
+     "Maximum observation candles after entry",
+     minval = 1, maxval = 500, group = GROUP_LIFECYCLE)
+bool crtEndPlanWithSession = input.bool(true,
+     "End reference when its entry session ends",
+     group = GROUP_LIFECYCLE)
+
+// ============================================================================
+// QUALIFIED-PLAN VISUAL INPUTS
+// ============================================================================
+string GROUP_CRT_VISUALS = "CRT Qualified-Plan Visuals"
+bool crtShowPlan = input.bool(true, "Show last qualified reference plan",
+     group = GROUP_CRT_VISUALS)
+bool crtClearPlanDaily = input.bool(true, "Clear reference plan on new trading day",
+     group = GROUP_CRT_VISUALS)
+bool crtExtendPlan = input.bool(true, "Extend ACTIVE reference lines right",
+     group = GROUP_CRT_VISUALS)
+int crtLineWidth = input.int(1, "Line width",
+     minval = 1, maxval = 4, group = GROUP_CRT_VISUALS)
+int crtLabelOffset = input.int(5, "Label offset — chart intervals",
+     minval = 1, maxval = 30, group = GROUP_CRT_VISUALS)
+string crtLabelFontInput = input.string("Small", "Plan-label font",
+     options = ["Tiny", "Small", "Normal"], group = GROUP_CRT_VISUALS)
+string crtEntryStyleInput = input.string("Dashed", "Entry line style",
+     options = ["Solid", "Dashed", "Dotted"], group = GROUP_CRT_VISUALS)
+string crtTargetStyleInput = input.string("Solid", "Target line style",
+     options = ["Solid", "Dashed", "Dotted"], group = GROUP_CRT_VISUALS)
+string crtStopStyleInput = input.string("Solid", "Stop line style",
+     options = ["Solid", "Dashed", "Dotted"], group = GROUP_CRT_VISUALS)
+color crtEntryColor = input.color(color.yellow, "Entry color",
+     group = GROUP_CRT_VISUALS)
+color crtTargetColor = input.color(color.lime, "Target color",
+     group = GROUP_CRT_VISUALS)
+color crtStopColor = input.color(color.red, "Stop color",
+     group = GROUP_CRT_VISUALS)
+
+string GROUP_CRT_ALERTS = "CRT Alerts"
+bool crtDynamicAlerts = input.bool(true, "Enable detailed entry alert() messages",
+     group = GROUP_CRT_ALERTS)
+bool crtLifecycleAlerts = input.bool(true,
+     "Enable reference lifecycle alert() messages", group = GROUP_CRT_ALERTS)
+
+// ============================================================================
+// 1H BIAS INPUTS
+// ============================================================================
+string GROUP_BIAS = "CRT 1H Bias Filter"
+bool crtUseBias = input.bool(false, "Enable 1H bias filter", group = GROUP_BIAS)
+string crtBiasSource = input.string("60-minute", "Bias source",
+     options = ["60-minute", "Chart timeframe"], group = GROUP_BIAS,
+     tooltip = "On a 60m chart the 60-minute source uses the chart's own prior confirmed candle.")
+string crtBiasPolicy = input.string("Require alignment", "Filter mode",
+     options = ["Require alignment", "Block counter-bias only"],
+     group = GROUP_BIAS,
+     tooltip = "Require alignment: the sweep must match the bias; flat bias blocks both. Block counter-bias only: flat bias allows both directions.")
+
+// ============================================================================
+// PROP-EVAL RISK GOVERNOR INPUTS
+// Reference accounting only: the governor tracks reference equity seeded at
+// the account size, never broker fills or broker-enforced limits.
+// ============================================================================
+string GROUP_GOV = "Prop-Eval Risk Governor"
+float govAccountSize = input.float(50000, "Account size",
+     minval = 1, step = 1000, group = GROUP_GOV)
+float govProfitTarget = input.float(3000, "Profit target",
+     minval = 1, step = 100, group = GROUP_GOV)
+float govMaxDrawdown = input.float(2000, "Maximum drawdown",
+     minval = 1, step = 100, group = GROUP_GOV)
+string govDrawdownType = input.string("EOD", "Drawdown type",
+     options = ["EOD", "Intraday"], group = GROUP_GOV)
+float govDailyLossLimit = input.float(300, "Daily loss limit",
+     minval = 1, step = 50, group = GROUP_GOV)
+string govFloorMode = input.string("Trailing EOD peak", "Account floor mode",
+     options = ["Trailing EOD peak", "Static (size - DD)"], group = GROUP_GOV)
+bool govStopAtPT = input.bool(false,
+     "Stop arming new sequences at the profit target", group = GROUP_GOV)
+
+// The reserved-risk budget can never exceed the daily loss limit (Q3).
+float crtDailyBudgetEff = math.min(crtDailyBudget, govDailyLossLimit)
+
+// ============================================================================
+// SUPPORTED CHARTS
+// ============================================================================
+bool supportedTF = timeframe.isminutes and
+     (timeframe.multiplier == 5 or timeframe.multiplier == 15 or
+     timeframe.multiplier == 30 or timeframe.multiplier == 60)
+
+bool supportedChart = supportedTF and chart.is_standard
+
+// Q1 decision: 5m charts keep chop diagnostics; the CRT engine needs 15m+.
+bool engineTF = timeframe.isminutes and
+     (timeframe.multiplier == 15 or timeframe.multiplier == 30 or
+     timeframe.multiplier == 60)
+bool engineChart = supportedChart and engineTF
+
+int chartMinutes = supportedTF ? timeframe.multiplier : 1
+int intervalBars = int(math.ceil(float(requestedMinutes) / chartMinutes))
+int effectiveMinutes = intervalBars * chartMinutes
+int intervalMilliseconds = effectiveMinutes * 60 * 1000
+
+// ============================================================================
+// GENERAL HELPERS
+// ============================================================================
+// Single source of truth for the chop grade boundaries: score < boundary.
+float CHOP_A = 15.0
+float CHOP_B = 30.0
+float CHOP_C = 45.0
+float CHOP_D = 60.0
+
+// Minimum score accepted for entry, derived from the grade input.
+float crtMinScore = crtMinGradeInput == "A" ? CHOP_A : CHOP_B
+
+f_grade(float score) =>
+    na(score) ? "—" :
+         score < CHOP_A ? "A" :
+         score < CHOP_B ? "B" :
+         score < CHOP_C ? "C" :
+         score < CHOP_D ? "D" : "F"
+
+f_gradeColor(float score) =>
+    na(score) ? color.rgb(45, 48, 55) :
+         score < CHOP_A ? color.rgb(25, 95, 55) :
+         score < CHOP_B ? color.rgb(55, 105, 40) :
+         score < CHOP_C ? color.rgb(115, 95, 20) :
+         score < CHOP_D ? color.rgb(135, 70, 20) :
+         color.rgb(125, 35, 40)
+
+f_changeText(float change) =>
+    na(change) ? "Baseline" :
+         change < -changeTolerance ? "Improving" :
+         change > changeTolerance ? "Worsening" : "Constant"
+
+f_changeColor(float change) =>
+    na(change) ? color.rgb(45, 48, 55) :
+         change < -changeTolerance ? color.rgb(25, 85, 55) :
+         change > changeTolerance ? color.rgb(110, 40, 40) :
+         color.rgb(65, 65, 65)
+
+f_number(float value) =>
+    na(value) ? "—" : str.tostring(value, "#.0")
+
+f_signed(float value) =>
+    na(value) ? "—" :
+         (value > 0 ? "+" : "") + str.tostring(value, "#.0")
+
+f_money(float value) =>
+    na(value) ? "—" : "$" + str.tostring(value, "#.00")
+
+f_crtPrice(float priceValue) =>
+    na(priceValue) ? "—" : str.tostring(priceValue, format.mintick)
+
+f_cell(table panel, int column, int row, string cellText,
+     color background, string font) =>
+    table.cell(panel, column, row, cellText,
+         text_color = color.white, bgcolor = background,
+         text_size = font, text_halign = text.align_left)
+
+// ============================================================================
+// REFERENCE LIFECYCLE HELPERS
+// ============================================================================
+f_crtPlanText(string planState) =>
+    switch planState
+        "ACTIVE" => "Active reference"
+        "TARGET_REACHED" => "Target reached"
+        "STOP_REACHED" => "Stop reached"
+        "AMBIGUOUS" => "Both reached; order unknown"
+        "EXPIRED" => "Observation window expired"
+        "SESSION_ENDED" => "Entry session ended"
+        "DAY_ENDED" => "Trading day ended"
+        => "No reference"
+
+f_crtPlanColor(string planState) =>
+    switch planState
+        "ACTIVE" => color.rgb(30, 75, 115)
+        "TARGET_REACHED" => color.rgb(25, 85, 55)
+        "STOP_REACHED" => color.rgb(110, 40, 40)
+        "AMBIGUOUS" => color.rgb(95, 55, 115)
+        "EXPIRED" => color.rgb(110, 75, 20)
+        "SESSION_ENDED" => color.rgb(110, 75, 20)
+        "DAY_ENDED" => color.rgb(110, 75, 20)
+        => color.rgb(32, 37, 45)
+
+f_refEndState(int endCode) =>
+    endCode == 1 ? "TARGET_REACHED" : endCode == -1 ? "STOP_REACHED" :
+         endCode == 2 ? "AMBIGUOUS" : endCode == 4 ? "SESSION_ENDED" :
+         endCode == 5 ? "DAY_ENDED" : "EXPIRED"
+
+// ============================================================================
+// SESSION HELPERS
+// Session strings are parsed defensively: shape, numeric ranges and an
+// optional day mask ("0930-1600:23456", 1 = Sunday) are validated. An invalid
+// string yields no key and is surfaced in the dashboard instead of producing
+// arbitrary session keys.
+// "Snap to chart candles" rounds the window out to chart-timeframe boundaries
+// so a 0930 start stays usable on a 60m chart; "Strict" keeps the exact window
+// and requires the entire candle to fit inside it.
+// ============================================================================
+f_crtSessionValid(string hoursInput) =>
+    int len = str.length(hoursInput)
+    bool ok = not na(len) and len >= 9
+
+    if ok
+        string digits = "0123456789"
+        for i = 0 to 8
+            string ch = str.substring(hoursInput, i, i + 1)
+            bool shapeOK = i == 4 ? ch == "-" : not na(str.pos(digits, ch))
+            if not shapeOK
+                ok := false
+
+    if ok
+        int startHour = int(str.tonumber(str.substring(hoursInput, 0, 2)))
+        int startMinute = int(str.tonumber(str.substring(hoursInput, 2, 4)))
+        int endHour = int(str.tonumber(str.substring(hoursInput, 5, 7)))
+        int endMinute = int(str.tonumber(str.substring(hoursInput, 7, 9)))
+        ok := startHour <= 23 and startMinute <= 59 and
+             endHour <= 23 and endMinute <= 59
+
+    if ok
+        int colon = str.pos(hoursInput, ":")
+        if not na(colon)
+            string mask = str.substring(hoursInput, colon + 1)
+            int maskLength = str.length(mask)
+            if maskLength > 0
+                string allowed = "1234567"
+                for i = 0 to maskLength - 1
+                    if na(str.pos(allowed, str.substring(mask, i, i + 1)))
+                        ok := false
+
+    ok
+
+f_crtDayMaskOK(string hoursInput, string zone) =>
+    int colon = str.pos(hoursInput, ":")
+    bool ok = true
+
+    if not na(colon)
+        string mask = str.substring(hoursInput, colon + 1)
+        int maskLength = str.length(mask)
+        if maskLength > 0
+            ok := false
+            string dowText = str.tostring(dayofweek(time, zone))
+            for i = 0 to maskLength - 1
+                if str.substring(mask, i, i + 1) == dowText
+                    ok := true
+
+    ok
+
+f_crtSessionKey(string hoursInput, string boundaryMode) =>
+    string zone = "America/New_York"
+    bool valid = f_crtSessionValid(hoursInput)
+    int result = na
+
+    if valid
+        int startHour = int(str.tonumber(str.substring(hoursInput, 0, 2)))
+        int startMinute = int(str.tonumber(str.substring(hoursInput, 2, 4)))
+        int endHour = int(str.tonumber(str.substring(hoursInput, 5, 7)))
+        int endMinute = int(str.tonumber(str.substring(hoursInput, 7, 9)))
+
+        int tfMinutes = timeframe.isminutes and timeframe.multiplier > 0 ?
+             timeframe.multiplier : 1
+        bool snap = boundaryMode == "Snap to chart candles"
+
+        int rawStart = startHour * 60 + startMinute
+        int rawEnd = endHour * 60 + endMinute
+        int snappedStart = snap ?
+             int(math.floor(rawStart / tfMinutes)) * tfMinutes : rawStart
+        int snappedEnd = snap ?
+             int(math.ceil(rawEnd / float(tfMinutes))) * tfMinutes : rawEnd
+
+        bool overnight = snappedEnd <= snappedStart
+        int startDayOffset = int(math.floor(snappedStart / 1440.0))
+        int startMinuteOfDay = snappedStart % 1440
+        int endDayOffset = int(math.floor(snappedEnd / 1440.0))
+        int endMinuteOfDay = snappedEnd % 1440
+
+        if overnight
+            endDayOffset := endDayOffset + 1
+
+        int yy = year(time, zone)
+        int mm = month(time, zone)
+        int dd = dayofmonth(time, zone)
+
+        int startStamp = timestamp(zone, yy, mm, dd + startDayOffset,
+             int(math.floor(startMinuteOfDay / 60.0)), startMinuteOfDay % 60)
+        int endStamp = timestamp(zone, yy, mm, dd + endDayOffset,
+             int(math.floor(endMinuteOfDay / 60.0)), endMinuteOfDay % 60)
+
+        // The pre-start part of an overnight session belongs to the previous
+        // calendar day; shift by one day instead of relying on timestamp()
+        // normalizing an out-of-range day number. DST transitions inside this
+        // window can shift the boundary by one hour; acceptable here.
+        if overnight and time < startStamp
+            startStamp := startStamp - 86400000
+            endStamp := endStamp - 86400000
+
+        bool inside = f_crtDayMaskOK(hoursInput, zone) and
+             time >= startStamp and time_close <= endStamp
+
+        if inside
+            result := startStamp
+
+    result
+
+// ============================================================================
+// DRAWING HELPERS
+// ============================================================================
+f_crtLineStyle(string styleName) =>
+    styleName == "Solid" ? line.style_solid :
+         styleName == "Dashed" ? line.style_dashed : line.style_dotted
+
+f_crtUpdateLine(line existingLine, int leftTime, int rightTime,
+     float priceValue, color lineColor, string styleValue,
+     int widthValue, bool extendValue) =>
+    line result = existingLine
+
+    if na(result)
+        result := line.new(
+             x1 = leftTime, y1 = priceValue,
+             x2 = rightTime, y2 = priceValue,
+             xloc = xloc.bar_time,
+             extend = extendValue ? extend.right : extend.none,
+             color = lineColor, style = styleValue, width = widthValue)
+    else
+        line.set_xy1(result, leftTime, priceValue)
+        line.set_xy2(result, rightTime, priceValue)
+        line.set_color(result, lineColor)
+        line.set_style(result, styleValue)
+        line.set_width(result, widthValue)
+        line.set_extend(result, extendValue ? extend.right : extend.none)
+
+    result
+
+f_crtUpdateLabel(label existingLabel, int labelTime, float priceValue,
+     string labelText, color labelColor, string fontValue) =>
+    label result = existingLabel
+
+    if na(result)
+        result := label.new(
+             x = labelTime, y = priceValue, text = labelText,
+             xloc = xloc.bar_time, yloc = yloc.price,
+             style = label.style_label_left,
+             color = color.new(labelColor, 75),
+             textcolor = color.white, size = fontValue)
+    else
+        label.set_xy(result, labelTime, priceValue)
+        label.set_text(result, labelText)
+        label.set_color(result, color.new(labelColor, 75))
+        label.set_size(result, fontValue)
+
+    result
+
+// ============================================================================
+// EXECUTION-INSTRUMENT RISK MODEL
+// ============================================================================
+bool crtNQFamily = syminfo.root == "NQ" or syminfo.root == "MNQ"
+bool crtESFamily = syminfo.root == "ES" or syminfo.root == "MES"
+bool crtYMFamily = syminfo.root == "YM" or syminfo.root == "MYM"
+bool crtRTYFamily = syminfo.root == "RTY" or syminfo.root == "M2K"
+
+float crtMicroPointValue = crtNQFamily ? 2.0 :
+     crtESFamily ? 5.0 :
+     crtYMFamily ? 0.5 :
+     crtRTYFamily ? 5.0 : na
+
+string crtMicroName = crtNQFamily ? "MNQ" :
+     crtESFamily ? "MES" :
+     crtYMFamily ? "MYM" :
+     crtRTYFamily ? "M2K" : "Unmapped"
+
+float crtPointValue = crtSizingMode == "Micro equivalent" ? crtMicroPointValue :
+     crtSizingMode == "Chart contract" ? syminfo.pointvalue :
+     crtCustomPointValue
+
+string crtExecutionName = crtSizingMode == "Micro equivalent" ? crtMicroName :
+     crtSizingMode == "Chart contract" ? syminfo.root : "Custom"
+
+bool crtRiskModelOK = syminfo.type == "futures" and
+     syminfo.currency == "USD" and
+     not na(crtPointValue) and crtPointValue > 0
+
+// ============================================================================
+// CHOP CALCULATION
+// ============================================================================
+float atr14 = ta.atr(14)
+bool enoughHistory = not na(atr14[lookback - 1])
+
+float alternatingCount = 0.0
+float wickCount = 0.0
+float alternatingSweeps = 0.0
+
+if supportedChart and enoughHistory
+    int previousSweepDirection = 0
+
+    for i = 0 to lookback - 2
+        float bodyA = math.abs(close[i] - open[i])
+        float bodyB = math.abs(close[i + 1] - open[i + 1])
+
+        int directionA = close[i] > open[i] ? 1 :
+             close[i] < open[i] ? -1 : 0
+        int directionB = close[i + 1] > open[i + 1] ? 1 :
+             close[i + 1] < open[i + 1] ? -1 : 0
+
+        bool alternating = directionA != 0 and directionB != 0 and
+             directionA != directionB
+        bool bothLarge = bodyA > atr14[i] * bodyThreshold and
+             bodyB > atr14[i + 1] * bodyThreshold
+
+        if alternating and bothLarge
+            alternatingCount += 1
+
+        bool sweptHigh = high[i] > high[i + 1] and close[i] < high[i + 1]
+        bool sweptLow = low[i] < low[i + 1] and close[i] > low[i + 1]
+
+        int sweepDirection = sweptHigh and not sweptLow ? 1 :
+             sweptLow and not sweptHigh ? -1 : 0
+
+        if sweepDirection != 0
+            if previousSweepDirection != 0 and
+                 sweepDirection != previousSweepDirection
+                alternatingSweeps += 1
+            previousSweepDirection := sweepDirection
+
+    for i = 0 to lookback - 1
+        float candleRange = high[i] - low[i]
+
+        if candleRange > 0
+            float upperWick = high[i] - math.max(open[i], close[i])
+            float lowerWick = math.min(open[i], close[i]) - low[i]
+
+            if (upperWick + lowerWick) / candleRange > wickThreshold
+                wickCount += 1
+
+// Denominators use the actual sample counts: the alternating and sweep loops
+// examine lookback - 1 candle pairs, the wick loop examines lookback candles.
+int pairSamples = lookback - 1
+float alternatingScore = alternatingCount / pairSamples * 100.0
+float wickScore = wickCount / lookback * 100.0
+float sweepScore = math.min(100.0,
+     alternatingSweeps / (pairSamples * 0.5) * 100.0)
+
+float calculatedScore = supportedChart and enoughHistory ?
+     alternatingScore * 0.45 + wickScore * 0.35 + sweepScore * 0.20 : na
+
+// ============================================================================
+// CLOSED-CANDLE CHOP STATE AND HISTORY
+// ============================================================================
+var float closedScore = na
+var int closedTime = na
+var int lastLoggedTime = na
+
+var array<float> loggedScores = array.new_float(0)
+var array<float> loggedChanges = array.new_float(0)
+var array<int> loggedTimes = array.new_int(0)
+
+if supportedChart and barstate.isconfirmed and not na(calculatedScore)
+    closedScore := calculatedScore
+    closedTime := time_close
+
+    bool logDue = na(lastLoggedTime) or
+         time_close - lastLoggedTime >= intervalMilliseconds
+
+    if logDue
+        float previousScore = array.size(loggedScores) > 0 ?
+             array.get(loggedScores, 0) : na
+        float change = na(previousScore) ? na : closedScore - previousScore
+
+        array.unshift(loggedScores, closedScore)
+        array.unshift(loggedChanges, change)
+        array.unshift(loggedTimes, time_close)
+        lastLoggedTime := time_close
+
+        if array.size(loggedScores) > historyRows
+            array.pop(loggedScores)
+            array.pop(loggedChanges)
+            array.pop(loggedTimes)
+
+bool chopQualified = supportedChart and not na(closedScore) and closedScore < crtMinScore
+
+plot(supportedChart ? closedScore : na, "Closed-candle chop score",
+     display = display.data_window)
+
+// ============================================================================
+// SESSION STATE
+// ============================================================================
+int crtNYKey = f_crtSessionKey(crtNYHours, crtSessionMode)
+int crtAsiaKey = f_crtSessionKey(crtAsiaHours, crtSessionMode)
+int crtLondonKey = f_crtSessionKey(crtLondonHours, crtSessionMode)
+
+bool crtNYValid = f_crtSessionValid(crtNYHours)
+bool crtAsiaValid = f_crtSessionValid(crtAsiaHours)
+bool crtLondonValid = f_crtSessionValid(crtLondonHours)
+
+bool crtSessionStringInvalid = crtUseSessions and
+     (crtEnableNY and not crtNYValid or
+     crtEnableAsia and not crtAsiaValid or
+     crtEnableLondon and not crtLondonValid)
+
+bool crtInNY = crtEnableNY and not na(crtNYKey)
+bool crtInAsia = crtEnableAsia and not na(crtAsiaKey)
+bool crtInLondon = crtEnableLondon and not na(crtLondonKey)
+
+bool crtSessionOK = not crtUseSessions or crtInNY or crtInAsia or crtInLondon
+
+int crtSessionKey = not crtUseSessions ? time_tradingday :
+     crtInNY ? crtNYKey : crtInAsia ? crtAsiaKey :
+     crtInLondon ? crtLondonKey : na
+
+string crtSessionName = not crtUseSessions ? "All hours" :
+     crtInNY ? "NY" : crtInAsia ? "Asia" :
+     crtInLondon ? "London" : "Off / partial-session candle"
+
+// Eligible candles observed in the current session; assists Playback
+// verification of session-boundary handling on higher timeframes.
+var int crtSessionCandles = 0
+var int crtSessionCandleKey = na
+
+if supportedChart and barstate.isconfirmed
+    if crtSessionOK and not na(crtSessionKey)
+        if na(crtSessionCandleKey) or crtSessionKey != crtSessionCandleKey
+            crtSessionCandles := 1
+            crtSessionCandleKey := crtSessionKey
+        else
+            crtSessionCandles := crtSessionCandles + 1
+    else
+        crtSessionCandles := 0
+        crtSessionCandleKey := na
+
+plot(supportedChart ? crtSessionCandles : na,
+     "Eligible session candles — current session",
+     display = display.data_window)
+
+// ============================================================================
+// 1H BIAS FILTER
+// Bias is the sign of the last CONFIRMED 60-minute candle body. The request
+// uses lookahead_off with a [1] offset inside the expression, so a developing
+// higher-timeframe value is never read. On a 60m chart, or when the bias
+// source is the chart timeframe, the chart's own prior confirmed candle is
+// used instead. The filter is OFF by default until validated in Playback.
+// ============================================================================
+float htfBiasBody = request.security(syminfo.tickerid, "60",
+     close[1] - open[1], lookahead = barmerge.lookahead_off)
+int htfBiasTime = request.security(syminfo.tickerid, "60",
+     time_close[1], lookahead = barmerge.lookahead_off)
+
+bool biasUsesHTF = crtBiasSource == "60-minute" and timeframe.multiplier != 60
+float crtBiasBody = biasUsesHTF ? htfBiasBody : close[1] - open[1]
+int crtBiasTime = biasUsesHTF ? htfBiasTime : time_close[1]
+int crtBiasDirection = na(crtBiasBody) ? 0 :
+     crtBiasBody > 0 ? 1 : crtBiasBody < 0 ? -1 : 0
+
+f_biasText(int biasDir) =>
+    biasDir == 1 ? "Up" : biasDir == -1 ? "Down" : "Flat"
+
+f_biasBlocked(int directionTest) =>
+    not crtUseBias ? false :
+         na(crtBiasBody) ? true :
+         crtBiasPolicy == "Block counter-bias only" and
+             crtBiasDirection == 0 ? false :
+         directionTest != crtBiasDirection
+
+plot(crtUseBias ? crtBiasBody : na,
+     "Bias candle body — confirmed 60m, points",
+     display = display.data_window)
+
+plot(crtUseBias ? crtBiasDirection : na,
+     "Bias direction — 1 up, -1 down, 0 flat", display = display.data_window)
+
+// ============================================================================
+// DAILY COUNTERS AND PER-REFERENCE STORAGE
+// Slot 0 tracks the LONG reference, slot 1 the SHORT reference. Empty slots
+// hold neutral defaults so no na comparisons are required for locks.
+// ============================================================================
+var int crtCountDay = na
+var int crtLongCount = 0
+var int crtShortCount = 0
+var float crtReservedRisk = 0.0
+
+var array<string> refState = array.new_string(2, "NONE")
+var array<float> refEntry = array.new_float(2, na)
+var array<float> refStop = array.new_float(2, na)
+var array<float> refTarget = array.new_float(2, na)
+var array<float> refRR = array.new_float(2, na)
+var array<int> refQty = array.new_int(2, 0)
+var array<float> refRisk = array.new_float(2, na)
+var array<string> refGrade = array.new_string(2, "—")
+var array<string> refInstrument = array.new_string(2, "—")
+var array<int> refEntryTime = array.new_int(2, -1)
+var array<int> refBar = array.new_int(2, -1)
+var array<int> refAge = array.new_int(2, 0)
+var array<int> refEndTime = array.new_int(2, -1)
+var array<int> refEndBar = array.new_int(2, -1)
+var array<int> refEndCode = array.new_int(2, 0)
+var array<int> refSessionKey = array.new_int(2, -1)
+var array<string> refSessionName = array.new_string(2, "—")
+
+// Outcome ledger — reference accounting only, never broker P&L.
+// Bucket order: 0 target, 1 stop, 2 ambiguous, 3 expired, 4 session end,
+// 5 trading day end.
+var array<int> ledDayCounts = array.new_int(6, 0)
+var array<int> ledSessionCounts = array.new_int(6, 0)
+var array<int> ledAllCounts = array.new_int(6, 0)
+var float ledDayGross = 0.0
+var float ledDayNet = 0.0
+var float ledSessionNet = 0.0
+var float ledAllNet = 0.0
+var int ledSessionKey = -1
+
+bool ledLongTargetEvent = false
+bool ledLongStopEvent = false
+bool ledShortTargetEvent = false
+bool ledShortStopEvent = false
+
+// Governor state — reference equity peak; never broker P&L.
+var float govPeakEquity = na
+
+f_outcomeIndex(int endCodeValue) =>
+    endCodeValue == 1 ? 0 : endCodeValue == -1 ? 1 : endCodeValue == 2 ? 2 :
+         endCodeValue == 3 ? 3 : endCodeValue == 4 ? 4 : 5
+
+f_ledEndMessage(int slot) =>
+    string ledgerDir = slot == 0 ? "LONG" : "SHORT"
+
+    "CRT Nitro 0.9.0-alpha.1 | " + syminfo.ticker + " | " +
+     timeframe.period + "m | " + ledgerDir + " reference " +
+     f_crtPlanText(array.get(refState, slot)) +
+     " | Entry ref " + f_crtPrice(array.get(refEntry, slot)) +
+     " | Stop ref " + f_crtPrice(array.get(refStop, slot)) +
+     " | Target ref " + f_crtPrice(array.get(refTarget, slot)) +
+     " | Chop " + array.get(refGrade, slot) +
+     " | Size ref " + str.tostring(array.get(refQty, slot)) + " " +
+     array.get(refInstrument, slot) +
+     " | Day outcomes T/S/A " + str.tostring(array.get(ledDayCounts, 0)) +
+     "/" + str.tostring(array.get(ledDayCounts, 1)) + "/" +
+     str.tostring(array.get(ledDayCounts, 2)) +
+     " | Day net reference P&L " + f_money(ledDayNet) +
+     " | Reference accounting; NOT a broker fill"
+
+bool crtNewCountDay = engineChart and
+     (na(crtCountDay) or time_tradingday != crtCountDay)
+
+// Event pulses are reset on every execution.
+// Lifecycle event codes stored per slot:
+//  1 = target reached
+// -1 = stop reached
+//  2 = both reached; order unknown
+//  3 = observation window expired
+//  4 = entry session ended
+//  5 = trading day ended
+bool crtLongEvent = false
+bool crtShortEvent = false
+
+// ============================================================================
+// SESSION LEDGER RESET
+// Session-to-date tallies reset when the active session key changes.
+// ============================================================================
+if engineChart and barstate.isconfirmed and not na(crtSessionKey)
+    if crtSessionKey != ledSessionKey
+        for i = 0 to 5
+            array.set(ledSessionCounts, i, 0)
+        ledSessionNet := 0.0
+        ledSessionKey := crtSessionKey
+
+// ============================================================================
+// REFERENCE LIFECYCLE
+// Runs before entry admission and evaluates each slot independently, so a
+// new reference cannot be evaluated here on its entry candle. Price
+// observations begin after the reference's own entry candle; the bar-index
+// check enforces that. End timestamps identify the confirming candle close,
+// not a broker fill.
+// ============================================================================
+if engineChart and barstate.isconfirmed
+    for slot = 0 to 1
+        if array.get(refState, slot) == "ACTIVE" and
+             bar_index > array.get(refBar, slot)
+
+            int slotDirection = slot == 0 ? 1 : -1
+            int slotAge = bar_index - array.get(refBar, slot)
+            array.set(refAge, slot, slotAge)
+
+            // Follow the original entry session rather than the current
+            // session priority when enabled sessions overlap.
+            string slotSessionName = array.get(refSessionName, slot)
+            int slotSessionKey = array.get(refSessionKey, slot)
+            int activeSessionKey = slotSessionName == "NY" ? crtNYKey :
+                 slotSessionName == "Asia" ? crtAsiaKey :
+                 slotSessionName == "London" ? crtLondonKey : time_tradingday
+
+            bool sessionEnded = crtUseSessions and crtEndPlanWithSession and
+                 (na(activeSessionKey) or activeSessionKey != slotSessionKey)
+
+            float slotStop = array.get(refStop, slot)
+            float slotTarget = array.get(refTarget, slot)
+            int endCode = 0
+
+            if crtNewCountDay
+                endCode := 5
+            else if sessionEnded
+                endCode := 4
+            else if slotAge > crtPlanMaxBars
+                // Defensive guard: fires only if the observation limit was
+                // lowered while this reference was live.
+                endCode := 3
+            else
+                // "Reached" means the candle range reached or passed the
+                // level. It does not assert execution at that price,
+                // including through gaps.
+                bool stopReached = slotDirection == 1 ?
+                     low <= slotStop : high >= slotStop
+                bool targetReached = slotDirection == 1 ?
+                     high >= slotTarget : low <= slotTarget
+
+                if stopReached and targetReached
+                    endCode := 2
+                else if stopReached
+                    endCode := -1
+                else if targetReached
+                    endCode := 1
+                else if slotAge >= crtPlanMaxBars
+                    endCode := 3
+
+            if endCode != 0
+                array.set(refState, slot, f_refEndState(endCode))
+                array.set(refEndCode, slot, endCode)
+                array.set(refEndTime, slot, time_close)
+                array.set(refEndBar, slot, bar_index)
+
+                // Outcome ledger — reference accounting only, not broker P&L.
+                int outcomeIndex = f_outcomeIndex(endCode)
+                float slotEntry = array.get(refEntry, slot)
+                float slotQty = array.get(refQty, slot)
+                int slotDir = slot == 0 ? 1 : -1
+                float slotPointValue = na(crtPointValue) ? 0.0 : crtPointValue
+                float exitPoints = endCode == 1 ?
+                     (array.get(refTarget, slot) - slotEntry) * slotDir :
+                     endCode == -1 or endCode == 2 ?
+                     (array.get(refStop, slot) - slotEntry) * slotDir : 0.0
+                float outcomeCosts = endCode == 1 or endCode == -1 or
+                     endCode == 2 ? slotQty * crtCostAllowance : 0.0
+                float grossPnL = exitPoints * slotQty * slotPointValue
+                float netPnL = grossPnL - outcomeCosts
+
+                array.set(ledDayCounts, outcomeIndex,
+                     array.get(ledDayCounts, outcomeIndex) + 1)
+                array.set(ledSessionCounts, outcomeIndex,
+                     array.get(ledSessionCounts, outcomeIndex) + 1)
+                array.set(ledAllCounts, outcomeIndex,
+                     array.get(ledAllCounts, outcomeIndex) + 1)
+                ledDayGross += grossPnL
+                ledDayNet += netPnL
+                ledSessionNet += netPnL
+                ledAllNet += netPnL
+
+                if endCode == 1
+                    if slot == 0
+                        ledLongTargetEvent := true
+                    else
+                        ledShortTargetEvent := true
+                else if endCode == -1 or endCode == 2
+                    if slot == 0
+                        ledLongStopEvent := true
+                    else
+                        ledShortStopEvent := true
+
+    // No refund to crtReservedRisk when a reference ends.
+
+// ============================================================================
+// LIFECYCLE ALERTS
+// One alert per terminal event, fired on the confirming candle close.
+// Ambiguous outcomes are reported through the stop/ambiguous condition.
+// ============================================================================
+if engineChart and barstate.isconfirmed and crtLifecycleAlerts
+    if array.get(refEndBar, 0) == bar_index and
+         array.get(refEndCode, 0) != 0
+        alert(f_ledEndMessage(0), alert.freq_once_per_bar_close)
+    if array.get(refEndBar, 1) == bar_index and
+         array.get(refEndCode, 1) != 0
+        alert(f_ledEndMessage(1), alert.freq_once_per_bar_close)
+
+alertcondition(ledLongTargetEvent, "CRT LONG target reached",
+     "CRT Nitro 0.9.0-alpha.1: LONG reference target reached. Reference accounting only.")
+
+alertcondition(ledLongStopEvent, "CRT LONG stop or ambiguous",
+     "CRT Nitro 0.9.0-alpha.1: LONG reference stop reached, or both levels touched.")
+
+alertcondition(ledShortTargetEvent, "CRT SHORT target reached",
+     "CRT Nitro 0.9.0-alpha.1: SHORT reference target reached. Reference accounting only.")
+
+alertcondition(ledShortStopEvent, "CRT SHORT stop or ambiguous",
+     "CRT Nitro 0.9.0-alpha.1: SHORT reference stop reached, or both levels touched.")
+
+// ============================================================================
+// CONFIRMED TRADING-DAY RESET
+// Runs after the lifecycle pass so day-boundary reference endings are
+// recorded before counters and plans reset.
+// ============================================================================
+if engineChart and barstate.isconfirmed and crtNewCountDay
+    float govEodEquity = govAccountSize + ledAllNet
+    govPeakEquity := na(govPeakEquity) ?
+         math.max(govAccountSize, govEodEquity) :
+         math.max(govPeakEquity, govEodEquity)
+
+    crtCountDay := time_tradingday
+    crtLongCount := 0
+    crtShortCount := 0
+    crtReservedRisk := 0.0
+
+    for i = 0 to 5
+        array.set(ledDayCounts, i, 0)
+    ledDayGross := 0.0
+    ledDayNet := 0.0
+
+    if crtClearPlanDaily
+        for slot = 0 to 1
+            bool endedThisBar = array.get(refEndBar, slot) == bar_index and
+                 array.get(refEndCode, slot) != 0
+            array.set(refState, slot, "NONE")
+            array.set(refEntry, slot, na)
+            array.set(refStop, slot, na)
+            array.set(refTarget, slot, na)
+            array.set(refRR, slot, na)
+            array.set(refQty, slot, 0)
+            array.set(refRisk, slot, na)
+            array.set(refGrade, slot, "—")
+            array.set(refInstrument, slot, "—")
+            array.set(refEntryTime, slot, -1)
+            array.set(refBar, slot, -1)
+            array.set(refAge, slot, 0)
+            array.set(refEndTime, slot, -1)
+            array.set(refEndCode, slot, 0)
+            array.set(refSessionKey, slot, -1)
+            array.set(refSessionName, slot, "—")
+            // Keep the same-candle lock when a reference ended this bar.
+            array.set(refEndBar, slot, endedThisBar ? bar_index : -1)
+
+// ============================================================================
+// PROP-EVAL RISK GOVERNOR
+// Reference accounting only; tracks reference equity seeded at the account
+// size. The daily-loss lockout takes precedence over directional quotas.
+// ============================================================================
+if engineChart and barstate.isconfirmed and govDrawdownType == "Intraday"
+    govPeakEquity := na(govPeakEquity) ?
+         math.max(govAccountSize, govAccountSize + ledAllNet) :
+         math.max(govPeakEquity, govAccountSize + ledAllNet)
+
+float govEquity = govAccountSize + ledAllNet
+float govStaticFloor = govAccountSize - govMaxDrawdown
+float govTrailingFloor = na(govPeakEquity) ? govStaticFloor :
+     math.max(govPeakEquity - govMaxDrawdown, govStaticFloor)
+float govFloor = govFloorMode == "Static (size - DD)" ? govStaticFloor :
+     govTrailingFloor
+float govFloorHeadroom = math.max(0.0, govEquity - govFloor)
+float govDllHeadroom = math.min(govDailyLossLimit,
+     math.max(0.0, govDailyLossLimit + ledDayNet))
+bool govDllLocked = ledDayNet <= -govDailyLossLimit
+bool govFloorBlocked = govFloorHeadroom <= 0
+bool govPtReached = govEquity >= govAccountSize + govProfitTarget
+bool govPtStop = govStopAtPT and govPtReached
+float govPctToPT = (govEquity - govAccountSize) / govProfitTarget * 100.0
+
+// ============================================================================
+// CRT CANDIDATE STATE
+// ============================================================================
+var string crtState = "IDLE"
+var string crtMode = "—"
+var string crtNote = "Waiting for confirmed C2"
+var int crtDirection = 0
+var int crtBornBar = na
+var int crtBornTime = na
+var int crtArmedSession = na
+var float crtBreakLevel = na
+var float crtTargetReference = na
+var float crtStopReference = na
+var float crtEntryReference = na
+var string crtEntryGrade = "—"
+
+bool crtSweptLow = low < low[1] and close > low[1] and close < high[1]
+bool crtSweptHigh = high > high[1] and close > low[1] and close < high[1]
+bool crtOneSidedC2 = crtSweptLow != crtSweptHigh
+
+bool crtPending = crtState == "WAIT_BREAK" or
+     crtState == "WAIT_PULLBACK" or crtState == "WAIT_REBREAK"
+
+// ============================================================================
+// CLOSED-CANDLE CRT ENTRY ENGINE
+// ============================================================================
+if engineChart and barstate.isconfirmed
+    bool mayArmThisBar = true
+
+    if crtPending
+        int age = bar_index - crtBornBar
+        bool sessionEnded = not crtSessionOK or crtSessionKey != crtArmedSession
+        bool invalidated = crtDirection == 1 ?
+             low <= crtStopReference : high >= crtStopReference
+        bool targetConsumed = crtDirection == 1 ?
+             high >= crtTargetReference : low <= crtTargetReference
+
+        int pendingSlot = crtDirection == 1 ? 0 : 1
+        bool pendingSlotActive = array.get(refState, pendingSlot) == "ACTIVE"
+        bool pendingSlotEnded = array.get(refEndBar, pendingSlot) == bar_index
+        bool pendingOtherActive = crtMaxConcurrent < 2 and
+             array.get(refState, 1 - pendingSlot) == "ACTIVE"
+        bool pendingOtherEnded = crtMaxConcurrent < 2 and
+             array.get(refEndBar, 1 - pendingSlot) == bar_index
+
+        if pendingSlotActive or pendingSlotEnded or
+             pendingOtherActive or pendingOtherEnded
+            crtState := "CANCELLED"
+            crtNote := "Reference lifecycle blocks this candle"
+        else if crtPause
+            crtState := "CANCELLED"
+            crtNote := "Manual pause"
+        else if sessionEnded
+            crtState := "EXPIRED"
+            crtNote := "Session or trading-day boundary"
+        else if govDllLocked
+            crtState := "CANCELLED"
+            crtNote := "Daily loss lockout; no new sequences today"
+        else if govFloorBlocked
+            crtState := "CANCELLED"
+            crtNote := "Account floor reached; no new sequences"
+        else if govPtStop
+            crtState := "CANCELLED"
+            crtNote := "Profit target reached; new sequences stopped"
+        else if age > crtMaxBars
+            crtState := "EXPIRED"
+            crtNote := "Entry window elapsed"
+        else if not chopQualified
+            crtState := "CANCELLED"
+            crtNote := "Chop deteriorated below " + crtMinGradeInput
+        else if f_biasBlocked(crtDirection)
+            crtState := "CANCELLED"
+            crtNote := "1H bias now opposes this setup"
+        else if invalidated
+            crtState := "INVALIDATED"
+            crtNote := "Structural stop boundary breached before entry"
+        else if targetConsumed
+            crtState := "TARGET_CONSUMED"
+            crtNote := "C1 target touched before confirmed entry"
+        else if age >= 1
+            bool closeBeyond = crtDirection == 1 ?
+                 close > crtBreakLevel : close < crtBreakLevel
+            bool pullbackClose = crtDirection == 1 ?
+                 close <= crtBreakLevel - crtPullbackTicks * syminfo.mintick :
+                 close >= crtBreakLevel + crtPullbackTicks * syminfo.mintick
+
+            bool triggerNow = false
+
+            if crtState == "WAIT_BREAK"
+                if closeBeyond
+                    if crtMode == "Direct"
+                        triggerNow := true
+                    else
+                        crtState := "WAIT_PULLBACK"
+                        crtNote := "Initial break confirmed; await later pullback close"
+            else if crtState == "WAIT_PULLBACK"
+                if pullbackClose
+                    crtState := "WAIT_REBREAK"
+                    crtNote := "Pullback confirmed; await later re-break close"
+            else if crtState == "WAIT_REBREAK"
+                if closeBeyond
+                    triggerNow := true
+
+            if triggerNow
+                bool directionQuotaOK = crtDirection == 1 ?
+                     crtLongCount < crtMaxLongs :
+                     crtShortCount < crtMaxShorts
+                bool totalQuotaOK = crtLongCount + crtShortCount < crtMaxTotal
+
+                float riskPoints = (close - crtStopReference) * crtDirection
+                float rewardPoints = (crtTargetReference - close) * crtDirection
+                bool entryGeometryOK = riskPoints > 0 and rewardPoints > 0
+                float referenceRR = entryGeometryOK ?
+                     rewardPoints / riskPoints : na
+
+                float remainingBudget = math.max(
+                     0.0, crtDailyBudgetEff - crtReservedRisk)
+                float availableRisk = math.min(crtMaxRisk,
+                     math.min(remainingBudget,
+                     math.min(govDllHeadroom, govFloorHeadroom)))
+                float riskPerContract = crtRiskModelOK and entryGeometryOK ?
+                     riskPoints * crtPointValue + crtCostAllowance : na
+
+                int suggestedQty = 0
+                if not na(riskPerContract) and riskPerContract > 0
+                    suggestedQty := int(math.min(
+                         crtMaxContracts,
+                         math.floor(availableRisk / riskPerContract)))
+
+                if not directionQuotaOK or not totalQuotaOK
+                    crtState := "DAILY_CAP"
+                    crtNote := not totalQuotaOK ?
+                         "Combined daily signal limit reached" :
+                         "Directional daily signal limit reached"
+                else if not crtRiskModelOK
+                    crtState := "RISK_BLOCKED"
+                    crtNote := "Use USD futures with a valid sizing point value"
+                else if not entryGeometryOK
+                    crtState := "RISK_BLOCKED"
+                    crtNote := "Invalid entry / stop / target geometry"
+                else if referenceRR < crtMinRR
+                    crtState := "RR_BLOCKED"
+                    crtNote := "Gross R:R " + str.tostring(referenceRR, "#.##") +
+                         " below minimum " + str.tostring(crtMinRR, "#.##")
+                else if suggestedQty < 1
+                    if govDllHeadroom <= 0
+                        crtState := "DLL_LOCKOUT"
+                        crtNote := "Daily loss limit reached; no new sequences today"
+                    else if riskPerContract > govFloorHeadroom
+                        crtState := "GOV_FLOOR_BLOCKED"
+                        crtNote := "One contract needs " + f_money(riskPerContract) +
+                             "; floor headroom " + f_money(govFloorHeadroom)
+                    else
+                        crtState := "RISK_BLOCKED"
+                        crtNote := "One contract needs " + f_money(riskPerContract) +
+                             "; available " + f_money(availableRisk)
+                else
+                    float admittedRisk = suggestedQty * riskPerContract
+                    int triggerSlot = crtDirection == 1 ? 0 : 1
+
+                    crtState := "TRIGGERED"
+                    crtEntryReference := close
+                    crtEntryGrade := f_grade(closedScore)
+                    crtNote := "Reference admitted; same-direction candidates locked while active"
+
+                    if crtDirection == 1
+                        crtLongCount += 1
+                        crtLongEvent := true
+                    else
+                        crtShortCount += 1
+                        crtShortEvent := true
+
+                    crtReservedRisk += admittedRisk
+
+                    array.set(refState, triggerSlot, "ACTIVE")
+                    array.set(refEntry, triggerSlot, crtEntryReference)
+                    array.set(refStop, triggerSlot, crtStopReference)
+                    array.set(refTarget, triggerSlot, crtTargetReference)
+                    array.set(refRR, triggerSlot, referenceRR)
+                    array.set(refQty, triggerSlot, suggestedQty)
+                    array.set(refRisk, triggerSlot, admittedRisk)
+                    array.set(refGrade, triggerSlot, crtEntryGrade)
+                    array.set(refInstrument, triggerSlot, crtExecutionName)
+                    array.set(refEntryTime, triggerSlot, time_close)
+                    array.set(refBar, triggerSlot, bar_index)
+                    array.set(refAge, triggerSlot, 0)
+                    array.set(refEndTime, triggerSlot, -1)
+                    array.set(refEndBar, triggerSlot, -1)
+                    array.set(refEndCode, triggerSlot, 0)
+                    array.set(refSessionKey, triggerSlot, crtSessionKey)
+                    array.set(refSessionName, triggerSlot, crtSessionName)
+
+        // A candidate that reached a terminal state other than TRIGGERED no
+        // longer blocks this candle from arming a fresh candidate. A still
+        // pending candidate and a TRIGGERED admission keep blocking it.
+        bool stillPending = crtState == "WAIT_BREAK" or
+             crtState == "WAIT_PULLBACK" or crtState == "WAIT_REBREAK"
+        mayArmThisBar := not stillPending and crtState != "TRIGGERED"
+
+    // No candidate creation while a same-direction reference is active or on
+    // its ending candle (or any reference when concurrency is 1), while
+    // paused, outside a session, or below the chop gate.
+    int sweepDirection = crtSweptLow ? 1 : -1
+    int sweepSlot = sweepDirection == 1 ? 0 : 1
+    bool sweepSlotActive = array.get(refState, sweepSlot) == "ACTIVE"
+    bool sweepSlotEnded = array.get(refEndBar, sweepSlot) == bar_index
+    bool sweepOtherActive = crtMaxConcurrent < 2 and
+         array.get(refState, 1 - sweepSlot) == "ACTIVE"
+    bool sweepOtherEnded = crtMaxConcurrent < 2 and
+         array.get(refEndBar, 1 - sweepSlot) == bar_index
+
+    if mayArmThisBar and engineChart and not crtPause and crtSessionOK and
+         chopQualified and crtOneSidedC2 and
+         not (sweepSlotActive or sweepSlotEnded or
+         sweepOtherActive or sweepOtherEnded)
+
+        int candidateDirection = crtSweptLow ? 1 : -1
+        float candidateBreak = candidateDirection == 1 ? high : low
+        float candidateTarget = candidateDirection == 1 ? high[1] : low[1]
+        float candidateStop = candidateDirection == 1 ?
+             low - crtStopTicks * syminfo.mintick :
+             high + crtStopTicks * syminfo.mintick
+
+        bool autoWantsRebreak = crtModeInput == "Auto (chop-based)" and
+             closedScore >= crtAutoThreshold
+        string candidateMode = crtModeInput == "Re-break" ? "Re-break" :
+             autoWantsRebreak ? "Re-break" : "Direct"
+        bool autoFallback = autoWantsRebreak and crtMaxBars < 3
+        if autoFallback
+            candidateMode := "Direct"
+
+        bool geometryOK = (candidateTarget - candidateBreak) *
+             candidateDirection > syminfo.mintick
+        bool enoughSequenceBars = candidateMode == "Direct" or crtMaxBars >= 3
+
+        bool candidateQuotaOK = candidateDirection == 1 ?
+             crtLongCount < crtMaxLongs :
+             crtShortCount < crtMaxShorts
+        bool candidateTotalOK = crtLongCount + crtShortCount < crtMaxTotal
+
+        string nextState = "WAIT_BREAK"
+        string nextNote = "C2 confirmed; risk qualification occurs at entry close" +
+             (autoFallback ?
+             " | Auto fallback to Direct while the entry window is under 3 candles" :
+             "")
+
+        if govDllLocked
+            nextState := "DLL_LOCKOUT"
+            nextNote := "Daily loss limit reached; no new sequences today"
+        else if govFloorBlocked
+            nextState := "GOV_FLOOR_BLOCKED"
+            nextNote := "Reference equity at or below the account floor"
+        else if govPtStop
+            nextState := "PT_REACHED"
+            nextNote := "Profit target reached; new sequences stopped"
+        else if not candidateTotalOK
+            nextState := "DAILY_CAP"
+            nextNote := "Combined daily signal limit reached"
+        else if not candidateQuotaOK
+            nextState := "DAILY_CAP"
+            nextNote := candidateDirection == 1 ?
+                 "Daily LONG signal limit reached" :
+                 "Daily SHORT signal limit reached"
+        else if f_biasBlocked(candidateDirection)
+            nextState := "BIAS_BLOCKED"
+            nextNote := "1H bias " + f_biasText(crtBiasDirection) +
+                 " opposes this setup"
+        else if not crtRiskModelOK
+            nextState := "RISK_BLOCKED"
+            nextNote := "Use USD futures with a valid sizing point value"
+        else if crtReservedRisk >= crtDailyBudgetEff
+            nextState := "RISK_BLOCKED"
+            nextNote := "Daily reserved signal-risk budget exhausted"
+        else if not geometryOK
+            nextState := "REJECTED"
+            nextNote := "Insufficient space between C2 break level and C1 target"
+        else if not enoughSequenceBars
+            nextState := "REJECTED"
+            nextNote := "Re-break requires at least 3 candles after C2"
+
+        crtState := nextState
+        crtNote := nextNote
+
+        // Candidate levels commit only for admitted candidates; a rejected
+        // sweep must not repaint the candidate block of the dashboard.
+        if nextState == "WAIT_BREAK"
+            crtDirection := candidateDirection
+            crtBornBar := bar_index
+            crtBornTime := time_close
+            crtArmedSession := crtSessionKey
+            crtBreakLevel := candidateBreak
+            crtTargetReference := candidateTarget
+            crtStopReference := math.round_to_mintick(candidateStop)
+            crtEntryReference := na
+            crtEntryGrade := "—"
+            crtMode := candidateMode
+
+// ============================================================================
+// QUALIFIED ENTRY MARKERS AND DATA-WINDOW OUTPUTS
+// ============================================================================
+plotshape(crtShowMarkers and crtLongEvent,
+     title = "CRT long reference", style = shape.triangleup,
+     location = location.belowbar, color = color.lime, size = size.small)
+
+plotshape(crtShowMarkers and crtShortEvent,
+     title = "CRT short reference", style = shape.triangledown,
+     location = location.abovebar, color = color.red, size = size.small)
+
+plot(crtLongEvent ? 1 : crtShortEvent ? -1 : na,
+     "Qualified signal direction", display = display.data_window)
+
+int eventSlot = crtLongEvent ? 0 : 1
+
+plot(crtLongEvent or crtShortEvent ? array.get(refQty, eventSlot) : na,
+     "Qualified signal contracts", display = display.data_window)
+
+plot(crtLongEvent or crtShortEvent ? array.get(refRisk, eventSlot) : na,
+     "Qualified signal estimated risk USD", display = display.data_window)
+
+plot(crtLongEvent or crtShortEvent ? array.get(refRR, eventSlot) : na,
+     "Qualified signal gross R:R", display = display.data_window)
+
+plot(supportedChart ? (array.get(refState, 0) == "ACTIVE" ? 1 : 0) : na,
+     "LONG reference active — 1 yes, 0 no", display = display.data_window)
+
+plot(supportedChart ? (array.get(refState, 1) == "ACTIVE" ? 1 : 0) : na,
+     "SHORT reference active — 1 yes, 0 no", display = display.data_window)
+
+plot(array.get(refState, 0) != "NONE" ? array.get(refAge, 0) : na,
+     "LONG reference age — confirmed chart candles",
+     display = display.data_window)
+
+plot(array.get(refState, 1) != "NONE" ? array.get(refAge, 1) : na,
+     "SHORT reference age — confirmed chart candles",
+     display = display.data_window)
+
+plot(array.get(refEndCode, 0) != 0 ? array.get(refEndCode, 0) : na,
+     "LONG reference end code: TP 1, SL -1, both 2, expiry 3, session 4, day 5",
+     display = display.data_window)
+
+plot(array.get(refEndCode, 1) != 0 ? array.get(refEndCode, 1) : na,
+     "SHORT reference end code: TP 1, SL -1, both 2, expiry 3, session 4, day 5",
+     display = display.data_window)
+
+// Outcome ledger tallies — reference accounting; visible for Playback
+// step-through. Cumulative values depend on loaded history.
+plot(engineChart ? array.get(ledDayCounts, 0) : na,
+     "Day target count", display = display.data_window)
+plot(engineChart ? array.get(ledDayCounts, 1) : na,
+     "Day stop count", display = display.data_window)
+plot(engineChart ? array.get(ledDayCounts, 2) : na,
+     "Day ambiguous count (counted as losses)", display = display.data_window)
+plot(engineChart ? array.get(ledDayCounts, 3) : na,
+     "Day expired count (unresolved)", display = display.data_window)
+plot(engineChart ? array.get(ledDayCounts, 4) : na,
+     "Day session-end count (unresolved)", display = display.data_window)
+plot(engineChart ? array.get(ledDayCounts, 5) : na,
+     "Day trading-day-end count (unresolved)", display = display.data_window)
+
+plot(engineChart ? array.get(ledSessionCounts, 0) : na,
+     "Session target count", display = display.data_window)
+plot(engineChart ? array.get(ledSessionCounts, 1) : na,
+     "Session stop count", display = display.data_window)
+plot(engineChart ? array.get(ledSessionCounts, 2) : na,
+     "Session ambiguous count (counted as losses)",
+     display = display.data_window)
+plot(engineChart ? array.get(ledSessionCounts, 3) : na,
+     "Session expired count (unresolved)", display = display.data_window)
+plot(engineChart ? array.get(ledSessionCounts, 4) : na,
+     "Session session-end count (unresolved)", display = display.data_window)
+plot(engineChart ? array.get(ledSessionCounts, 5) : na,
+     "Session trading-day-end count (unresolved)",
+     display = display.data_window)
+
+plot(engineChart ? array.get(ledAllCounts, 0) : na,
+     "Cumulative target count (loaded history)", display = display.data_window)
+plot(engineChart ? array.get(ledAllCounts, 1) : na,
+     "Cumulative stop count (loaded history)", display = display.data_window)
+plot(engineChart ? array.get(ledAllCounts, 2) : na,
+     "Cumulative ambiguous count (loaded history; counted as losses)",
+     display = display.data_window)
+plot(engineChart ? array.get(ledAllCounts, 3) : na,
+     "Cumulative expired count (loaded history)", display = display.data_window)
+plot(engineChart ? array.get(ledAllCounts, 4) : na,
+     "Cumulative session-end count (loaded history)",
+     display = display.data_window)
+plot(engineChart ? array.get(ledAllCounts, 5) : na,
+     "Cumulative day-end count (loaded history)", display = display.data_window)
+
+plot(engineChart ? ledDayGross : na,
+     "Day gross reference P&L USD", display = display.data_window)
+plot(engineChart ? ledDayNet : na,
+     "Day net reference P&L USD", display = display.data_window)
+plot(engineChart ? ledSessionNet : na,
+     "Session net reference P&L USD", display = display.data_window)
+plot(engineChart ? ledAllNet : na,
+     "Cumulative net reference P&L USD (loaded history)",
+     display = display.data_window)
+
+// Prop-eval governor — reference accounting; not broker P&L.
+plot(engineChart ? govEquity : na,
+     "Reference equity USD — seeded at account size",
+     display = display.data_window)
+plot(engineChart ? govFloor : na, "Account floor USD",
+     display = display.data_window)
+plot(engineChart ? govFloorHeadroom : na, "Floor headroom USD",
+     display = display.data_window)
+plot(engineChart ? govDllHeadroom : na, "Daily loss limit headroom USD",
+     display = display.data_window)
+plot(engineChart ? govPctToPT : na,
+     "Reference progress to profit target — percent",
+     display = display.data_window)
+plot(engineChart ? (govDllLocked ? 1 : 0) : na,
+     "Governor DLL lockout — 1 locked", display = display.data_window)
+
+// ============================================================================
+// PER-REFERENCE DRAWINGS
+// One entry/stop/target line trio and label trio per direction. Only ACTIVE
+// references may extend right; ended lines terminate at the close that
+// confirmed the recorded status. Labels remain right for readability.
+// ============================================================================
+var line crtLongEntryLine = na
+var line crtLongTargetLine = na
+var line crtLongStopLine = na
+var label crtLongEntryLabel = na
+var label crtLongTargetLabel = na
+var label crtLongStopLabel = na
+var line crtShortEntryLine = na
+var line crtShortTargetLine = na
+var line crtShortStopLine = na
+var label crtShortEntryLabel = na
+var label crtShortTargetLabel = na
+var label crtShortStopLabel = na
+
+string crtPlanFont = crtLabelFontInput == "Tiny" ? size.tiny :
+     crtLabelFontInput == "Normal" ? size.normal : size.small
+
+if barstate.islast
+    int chartMilliseconds = int(timeframe.in_seconds() * 1000)
+    int labelTime = time_close + crtLabelOffset * chartMilliseconds
+
+    // LONG reference — slot 0.
+    if supportedChart and crtShowPlan and not na(array.get(refEntry, 0))
+        bool refActive = array.get(refState, 0) == "ACTIVE"
+        int refEntryT = array.get(refEntryTime, 0)
+        int refEndT = array.get(refEndTime, 0)
+        int lineRightTime = refActive ? labelTime :
+             refEndT > 0 ? refEndT : refEntryT
+        bool extendRef = refActive and crtExtendPlan
+        int lineTransparency = refActive ? 0 : 55
+
+        crtLongEntryLine := f_crtUpdateLine(
+             crtLongEntryLine, refEntryT, lineRightTime,
+             array.get(refEntry, 0),
+             color.new(crtEntryColor, lineTransparency),
+             f_crtLineStyle(crtEntryStyleInput), crtLineWidth, extendRef)
+
+        crtLongTargetLine := f_crtUpdateLine(
+             crtLongTargetLine, refEntryT, lineRightTime,
+             array.get(refTarget, 0),
+             color.new(crtTargetColor, lineTransparency),
+             f_crtLineStyle(crtTargetStyleInput), crtLineWidth, extendRef)
+
+        crtLongStopLine := f_crtUpdateLine(
+             crtLongStopLine, refEntryT, lineRightTime,
+             array.get(refStop, 0),
+             color.new(crtStopColor, lineTransparency),
+             f_crtLineStyle(crtStopStyleInput), crtLineWidth, extendRef)
+
+        crtLongEntryLabel := f_crtUpdateLabel(
+             crtLongEntryLabel, labelTime, array.get(refEntry, 0),
+             "LONG [" + array.get(refGrade, 0) + "] " +
+             f_crtPlanText(array.get(refState, 0)) +
+             "\nENTRY REF " + f_crtPrice(array.get(refEntry, 0)) +
+             " | " + str.tostring(array.get(refQty, 0)) + " " +
+             array.get(refInstrument, 0),
+             crtEntryColor, crtPlanFont)
+
+        crtLongTargetLabel := f_crtUpdateLabel(
+             crtLongTargetLabel, labelTime, array.get(refTarget, 0),
+             "TARGET REF " + f_crtPrice(array.get(refTarget, 0)) +
+             " | Gross R:R " + str.tostring(array.get(refRR, 0), "#.##"),
+             crtTargetColor, crtPlanFont)
+
+        crtLongStopLabel := f_crtUpdateLabel(
+             crtLongStopLabel, labelTime, array.get(refStop, 0),
+             "STOP REF " + f_crtPrice(array.get(refStop, 0)) +
+             " | Est. risk " + f_money(array.get(refRisk, 0)),
+             crtStopColor, crtPlanFont)
+    else
+        if not na(crtLongEntryLine)
+            line.delete(crtLongEntryLine)
+            crtLongEntryLine := na
+        if not na(crtLongTargetLine)
+            line.delete(crtLongTargetLine)
+            crtLongTargetLine := na
+        if not na(crtLongStopLine)
+            line.delete(crtLongStopLine)
+            crtLongStopLine := na
+        if not na(crtLongEntryLabel)
+            label.delete(crtLongEntryLabel)
+            crtLongEntryLabel := na
+        if not na(crtLongTargetLabel)
+            label.delete(crtLongTargetLabel)
+            crtLongTargetLabel := na
+        if not na(crtLongStopLabel)
+            label.delete(crtLongStopLabel)
+            crtLongStopLabel := na
+
+    // SHORT reference — slot 1.
+    if supportedChart and crtShowPlan and not na(array.get(refEntry, 1))
+        bool refActive = array.get(refState, 1) == "ACTIVE"
+        int refEntryT = array.get(refEntryTime, 1)
+        int refEndT = array.get(refEndTime, 1)
+        int lineRightTime = refActive ? labelTime :
+             refEndT > 0 ? refEndT : refEntryT
+        bool extendRef = refActive and crtExtendPlan
+        int lineTransparency = refActive ? 0 : 55
+
+        crtShortEntryLine := f_crtUpdateLine(
+             crtShortEntryLine, refEntryT, lineRightTime,
+             array.get(refEntry, 1),
+             color.new(crtEntryColor, lineTransparency),
+             f_crtLineStyle(crtEntryStyleInput), crtLineWidth, extendRef)
+
+        crtShortTargetLine := f_crtUpdateLine(
+             crtShortTargetLine, refEntryT, lineRightTime,
+             array.get(refTarget, 1),
+             color.new(crtTargetColor, lineTransparency),
+             f_crtLineStyle(crtTargetStyleInput), crtLineWidth, extendRef)
+
+        crtShortStopLine := f_crtUpdateLine(
+             crtShortStopLine, refEntryT, lineRightTime,
+             array.get(refStop, 1),
+             color.new(crtStopColor, lineTransparency),
+             f_crtLineStyle(crtStopStyleInput), crtLineWidth, extendRef)
+
+        crtShortEntryLabel := f_crtUpdateLabel(
+             crtShortEntryLabel, labelTime, array.get(refEntry, 1),
+             "SHORT [" + array.get(refGrade, 1) + "] " +
+             f_crtPlanText(array.get(refState, 1)) +
+             "\nENTRY REF " + f_crtPrice(array.get(refEntry, 1)) +
+             " | " + str.tostring(array.get(refQty, 1)) + " " +
+             array.get(refInstrument, 1),
+             crtEntryColor, crtPlanFont)
+
+        crtShortTargetLabel := f_crtUpdateLabel(
+             crtShortTargetLabel, labelTime, array.get(refTarget, 1),
+             "TARGET REF " + f_crtPrice(array.get(refTarget, 1)) +
+             " | Gross R:R " + str.tostring(array.get(refRR, 1), "#.##"),
+             crtTargetColor, crtPlanFont)
+
+        crtShortStopLabel := f_crtUpdateLabel(
+             crtShortStopLabel, labelTime, array.get(refStop, 1),
+             "STOP REF " + f_crtPrice(array.get(refStop, 1)) +
+             " | Est. risk " + f_money(array.get(refRisk, 1)),
+             crtStopColor, crtPlanFont)
+    else
+        if not na(crtShortEntryLine)
+            line.delete(crtShortEntryLine)
+            crtShortEntryLine := na
+        if not na(crtShortTargetLine)
+            line.delete(crtShortTargetLine)
+            crtShortTargetLine := na
+        if not na(crtShortStopLine)
+            line.delete(crtShortStopLine)
+            crtShortStopLine := na
+        if not na(crtShortEntryLabel)
+            label.delete(crtShortEntryLabel)
+            crtShortEntryLabel := na
+        if not na(crtShortTargetLabel)
+            label.delete(crtShortTargetLabel)
+            crtShortTargetLabel := na
+        if not na(crtShortStopLabel)
+            label.delete(crtShortStopLabel)
+            crtShortStopLabel := na
+
+// ============================================================================
+// ENTRY-REFERENCE ALERTS
+// No lifecycle alerts or broker orders in this release.
+// ============================================================================
+if crtDynamicAlerts and (crtLongEvent or crtShortEvent)
+    string directionName = crtLongEvent ? "LONG" : "SHORT"
+    int alertSlot = crtLongEvent ? 0 : 1
+    int directionCount = crtLongEvent ? crtLongCount : crtShortCount
+    int directionLimit = crtLongEvent ? crtMaxLongs : crtMaxShorts
+
+    alert("CRT Nitro 0.9.0-alpha.1 | " + syminfo.ticker +
+         " | " + timeframe.period + "m | " + directionName +
+         " | Chop " + array.get(refGrade, alertSlot) +
+         " | Entry ref " + f_crtPrice(array.get(refEntry, alertSlot)) +
+         " | Stop ref " + f_crtPrice(array.get(refStop, alertSlot)) +
+         " | Target ref " + f_crtPrice(array.get(refTarget, alertSlot)) +
+         " | Size ref " + str.tostring(array.get(refQty, alertSlot)) +
+         " " + array.get(refInstrument, alertSlot) +
+         " | Est. risk " + f_money(array.get(refRisk, alertSlot)) +
+         " | Gross R:R " + str.tostring(array.get(refRR, alertSlot), "#.##") +
+         " | Directional signals " + str.tostring(directionCount) +
+         "/" + str.tostring(directionLimit) +
+         " | Total signals " + str.tostring(crtLongCount + crtShortCount) +
+         "/" + str.tostring(crtMaxTotal) +
+         " | Reserved signal risk " + f_money(crtReservedRisk) +
+         " | Reference active; NOT a broker fill",
+         alert.freq_once_per_bar_close)
+
+alertcondition(crtLongEvent, "CRT qualified LONG",
+     "CRT Nitro 0.9.0-alpha.1: qualified LONG reference. Verify actual account risk.")
+
+alertcondition(crtShortEvent, "CRT qualified SHORT",
+     "CRT Nitro 0.9.0-alpha.1: qualified SHORT reference. Verify actual account risk.")
+
+// ============================================================================
+// DASHBOARD — v0.9.0-alpha.1
+// Rows 0–24: dashboard. Rows 25–26: 1H bias. Rows 27–31: outcome ledger.
+// Rows 32–36: prop-eval governor.
+// Row 37: history header.
+// Row 38 onward: history snapshots.
+// ============================================================================
+string panelPosition = switch positionInput
+    "Top Left" => position.top_left
+    "Middle Right" => position.middle_right
+    "Bottom Left" => position.bottom_left
+    "Bottom Right" => position.bottom_right
+    => position.top_right
+
+string panelFont = switch sizeInput
+    "Tiny" => size.tiny
+    "Normal" => size.normal
+    "Large" => size.large
+    => size.small
+
+var table panel = table.new(panelPosition, 4, historyRows + 38,
+     border_width = 1, border_color = color.rgb(65, 70, 80))
+
+if barstate.islast
+    color neutral = color.rgb(32, 37, 45)
+    color header = color.rgb(20, 24, 30)
+    color warning = color.rgb(110, 75, 20)
+    color positive = color.rgb(25, 85, 55)
+
+    table.clear(panel, 0, 0, 3, historyRows + 37)
+
+    f_cell(panel, 0, 0, "CRT NITRO", header, panelFont)
+    f_cell(panel, 1, 0, "0.9.0-alpha.1", header, panelFont)
+    f_cell(panel, 2, 0, "UNSTABLE", warning, panelFont)
+    f_cell(panel, 3, 0, "PROP-EVAL GOVERNOR", header, panelFont)
+
+    if not supportedTF
+        f_cell(panel, 0, 1,
+             "Use a 5m, 15m, 30m or 60m timeframe", warning, panelFont)
+
+    else if not chart.is_standard
+        f_cell(panel, 0, 1,
+             "Use standard time-based candles", warning, panelFont)
+
+    else
+        float latestChange = array.size(loggedChanges) > 0 ?
+             array.get(loggedChanges, 0) : na
+
+        string directionLabel = crtDirection == 1 ? "LONG" :
+             crtDirection == -1 ? "SHORT" : "—"
+
+        bool pendingNow = crtState == "WAIT_BREAK" or
+             crtState == "WAIT_PULLBACK" or crtState == "WAIT_REBREAK"
+
+        bool longSlotActive = array.get(refState, 0) == "ACTIVE"
+        bool shortSlotActive = array.get(refState, 1) == "ACTIVE"
+        bool candidateRefActive = crtDirection == 0 ? false :
+             array.get(refState, crtDirection == 1 ? 0 : 1) == "ACTIVE"
+
+        color stateColor = crtState == "TRIGGERED" and candidateRefActive ?
+             positive :
+             pendingNow or crtState == "DAILY_CAP" or
+             crtState == "RISK_BLOCKED" or crtState == "RR_BLOCKED" ?
+             warning : neutral
+
+        string stateLabel = crtState == "TRIGGERED" ?
+             "ENTRY RECORDED" : crtState
+
+        string engineNote = crtState == "TRIGGERED" ?
+             (candidateRefActive ?
+             "Last entry admitted; its reference is active" :
+             "Last entry admitted; see reference status") : crtNote
+
+        string ageLabel = pendingNow and not na(crtBornBar) ?
+             str.tostring(bar_index - crtBornBar) + " / " +
+             str.tostring(crtMaxBars) : "—"
+
+        int totalSignals = crtLongCount + crtShortCount
+        float remainingDailyRisk = math.max(
+             0.0, crtDailyBudget - crtReservedRisk)
+
+        bool bothDirectionsFull = crtLongCount >= crtMaxLongs and
+             crtShortCount >= crtMaxShorts
+
+        string permissionLabel = crtPause ? "PAUSED; monitoring continues" :
+             not engineTF ? "5m: chop diagnostics only; engine needs 15m+" :
+             crtSessionStringInvalid ? "Invalid session string" :
+             not crtSessionOK ? "Outside session" :
+             not chopQualified ? "Chop blocked" :
+             crtUseBias and f_biasBlocked(1) and f_biasBlocked(-1) ?
+             "1H bias blocks both directions" :
+             crtUseBias and f_biasBlocked(1) ? "1H bias blocks LONG" :
+             crtUseBias and f_biasBlocked(-1) ? "1H bias blocks SHORT" :
+             govDllLocked ? "DLL lockout; no new sequences today" :
+             govFloorBlocked ? "Account floor reached; no new sequences" :
+             govPtStop ? "Profit target reached; new sequences stopped" :
+             not crtRiskModelOK ? "Invalid risk model" :
+             totalSignals >= crtMaxTotal ? "Combined cap reached" :
+             bothDirectionsFull ? "Both direction caps reached" :
+             remainingDailyRisk <= 0 ? "Signal-risk budget exhausted" :
+             longSlotActive and shortSlotActive ?
+             "Both references active; no new candidates" :
+             longSlotActive ? "LONG reference active; SHORT available" :
+             shortSlotActive ? "SHORT reference active; LONG available" :
+             crtLongCount >= crtMaxLongs ? "SHORT only; risk checked at entry" :
+             crtShortCount >= crtMaxShorts ? "LONG only; risk checked at entry" :
+             "Enabled; risk checked at entry"
+
+        f_cell(panel, 0, 1, "Chart timeframe", neutral, panelFont)
+        f_cell(panel, 1, 1, str.tostring(chartMinutes) + "m", neutral, panelFont)
+        f_cell(panel, 2, 1, "Logging interval", neutral, panelFont)
+        f_cell(panel, 3, 1, str.tostring(effectiveMinutes) + "m", neutral, panelFont)
+
+        f_cell(panel, 0, 2, "Latest closed score", neutral, panelFont)
+        f_cell(panel, 1, 2, f_number(closedScore),
+             f_gradeColor(closedScore), panelFont)
+        f_cell(panel, 2, 2, "Grade " + f_grade(closedScore),
+             f_gradeColor(closedScore), panelFont)
+        f_cell(panel, 3, 2, na(closedScore) ? "Warming up" :
+             chopQualified ?
+             (crtMinGradeInput == "A" ? "A chop pass" : "A/B chop pass") :
+             "Chop blocked",
+             f_gradeColor(closedScore), panelFont)
+
+        f_cell(panel, 0, 3, "Sampled trend", neutral, panelFont)
+        f_cell(panel, 1, 3, f_changeText(latestChange),
+             f_changeColor(latestChange), panelFont)
+        f_cell(panel, 2, 3, "Score change", neutral, panelFont)
+        f_cell(panel, 3, 3, f_signed(latestChange),
+             f_changeColor(latestChange), panelFont)
+
+        f_cell(panel, 0, 4, "Last candle close", neutral, panelFont)
+        f_cell(panel, 1, 4, na(closedTime) ? "—" :
+             str.format_time(closedTime, "MM-dd HH:mm", logTimezone),
+             neutral, panelFont)
+        f_cell(panel, 2, 4, "New-sequence permission", neutral, panelFont)
+        f_cell(panel, 3, 4, permissionLabel,
+             longSlotActive or shortSlotActive or crtPause ? warning : neutral,
+             panelFont)
+
+        f_cell(panel, 0, 5, "Current session", neutral, panelFont)
+        f_cell(panel, 1, 5, crtSessionName, neutral, panelFont)
+        f_cell(panel, 2, 5, "Candidate / last direction", neutral, panelFont)
+        f_cell(panel, 3, 5, directionLabel, neutral, panelFont)
+
+        f_cell(panel, 0, 6, "Entry-engine state", neutral, panelFont)
+        f_cell(panel, 1, 6, stateLabel, stateColor, panelFont)
+        f_cell(panel, 2, 6, "Entry mode", neutral, panelFont)
+        f_cell(panel, 3, 6, crtMode, neutral, panelFont)
+
+        f_cell(panel, 0, 7, "C2 closed", neutral, panelFont)
+        f_cell(panel, 1, 7, na(crtBornTime) ? "—" :
+             str.format_time(crtBornTime, "MM-dd HH:mm", logTimezone),
+             neutral, panelFont)
+        f_cell(panel, 2, 7, "Candles after C2 / max", neutral, panelFont)
+        f_cell(panel, 3, 7, ageLabel, neutral, panelFont)
+
+        f_cell(panel, 0, 8, "Candidate C2 break", neutral, panelFont)
+        f_cell(panel, 1, 8, f_crtPrice(crtBreakLevel), neutral, panelFont)
+        f_cell(panel, 2, 8, "Candidate C1 target", neutral, panelFont)
+        f_cell(panel, 3, 8, f_crtPrice(crtTargetReference), neutral, panelFont)
+
+        f_cell(panel, 0, 9, "Engine entry ref", neutral, panelFont)
+        f_cell(panel, 1, 9, f_crtPrice(crtEntryReference), neutral, panelFont)
+        f_cell(panel, 2, 9, "Candidate structural stop", neutral, panelFont)
+        f_cell(panel, 3, 9, f_crtPrice(crtStopReference), neutral, panelFont)
+
+        f_cell(panel, 0, 10, "Engine note", neutral, panelFont)
+        f_cell(panel, 1, 10, engineNote, neutral, panelFont)
+        f_cell(panel, 2, 10, "Engine entry grade", neutral, panelFont)
+        f_cell(panel, 3, 10, crtEntryGrade, neutral, panelFont)
+
+        f_cell(panel, 0, 11, "LONG signals / day", neutral, panelFont)
+        f_cell(panel, 1, 11,
+             str.tostring(crtLongCount) + " / " + str.tostring(crtMaxLongs),
+             crtLongCount >= crtMaxLongs ? warning : neutral, panelFont)
+        f_cell(panel, 2, 11, "SHORT signals / day", neutral, panelFont)
+        f_cell(panel, 3, 11,
+             str.tostring(crtShortCount) + " / " + str.tostring(crtMaxShorts),
+             crtShortCount >= crtMaxShorts ? warning : neutral, panelFont)
+
+        // Per-direction reference rows (slot 0 = LONG, slot 1 = SHORT).
+        string longRefStatus = array.get(refState, 0) == "NONE" ? "—" :
+             f_crtPlanText(array.get(refState, 0)) +
+             (array.get(refEndTime, 0) > 0 ?
+             " @ " + str.format_time(array.get(refEndTime, 0),
+             "MM-dd HH:mm", logTimezone) : "")
+        string shortRefStatus = array.get(refState, 1) == "NONE" ? "—" :
+             f_crtPlanText(array.get(refState, 1)) +
+             (array.get(refEndTime, 1) > 0 ?
+             " @ " + str.format_time(array.get(refEndTime, 1),
+             "MM-dd HH:mm", logTimezone) : "")
+        string longRefAge = array.get(refState, 0) == "NONE" ? "—" :
+             str.tostring(array.get(refAge, 0)) + " / " +
+             str.tostring(crtPlanMaxBars)
+        string shortRefAge = array.get(refState, 1) == "NONE" ? "—" :
+             str.tostring(array.get(refAge, 1)) + " / " +
+             str.tostring(crtPlanMaxBars)
+        string longRefSize = array.get(refState, 0) == "NONE" ? "—" :
+             array.get(refGrade, 0) + " | " +
+             str.tostring(array.get(refQty, 0)) + " " +
+             array.get(refInstrument, 0)
+        string shortRefSize = array.get(refState, 1) == "NONE" ? "—" :
+             array.get(refGrade, 1) + " | " +
+             str.tostring(array.get(refQty, 1)) + " " +
+             array.get(refInstrument, 1)
+
+        f_cell(panel, 0, 12, "LONG reference", neutral, panelFont)
+        f_cell(panel, 1, 12, longRefStatus,
+             f_crtPlanColor(array.get(refState, 0)), panelFont)
+        f_cell(panel, 2, 12, "Entry ref", neutral, panelFont)
+        f_cell(panel, 3, 12, f_crtPrice(array.get(refEntry, 0)),
+             neutral, panelFont)
+
+        f_cell(panel, 0, 13, "LONG ref age / limit", neutral, panelFont)
+        f_cell(panel, 1, 13, longRefAge, neutral, panelFont)
+        f_cell(panel, 2, 13, "LONG grade / size", neutral, panelFont)
+        f_cell(panel, 3, 13, longRefSize, neutral, panelFont)
+
+        f_cell(panel, 0, 14, "SHORT reference", neutral, panelFont)
+        f_cell(panel, 1, 14, shortRefStatus,
+             f_crtPlanColor(array.get(refState, 1)), panelFont)
+        f_cell(panel, 2, 14, "Entry ref", neutral, panelFont)
+        f_cell(panel, 3, 14, f_crtPrice(array.get(refEntry, 1)),
+             neutral, panelFont)
+
+        f_cell(panel, 0, 15, "SHORT ref age / limit", neutral, panelFont)
+        f_cell(panel, 1, 15, shortRefAge, neutral, panelFont)
+        f_cell(panel, 2, 15, "SHORT grade / size", neutral, panelFont)
+        f_cell(panel, 3, 15, shortRefSize, neutral, panelFont)
+
+        // Most recent admission across both slots.
+        int longAdmitTime = array.get(refEntryTime, 0)
+        int shortAdmitTime = array.get(refEntryTime, 1)
+        bool hasLongAdmit = longAdmitTime > 0
+        bool hasShortAdmit = shortAdmitTime > 0
+        int lastAdmitSlot = not hasLongAdmit and not hasShortAdmit ? -1 :
+             not hasShortAdmit ? 0 : not hasLongAdmit ? 1 :
+             longAdmitTime >= shortAdmitTime ? 0 : 1
+        float lastAdmitRR = na
+        int lastAdmitTime = -1
+        if lastAdmitSlot >= 0
+            lastAdmitRR := array.get(refRR, lastAdmitSlot)
+            lastAdmitTime := array.get(refEntryTime, lastAdmitSlot)
+
+        f_cell(panel, 0, 16, "Last admitted reference", neutral, panelFont)
+        f_cell(panel, 1, 16, lastAdmitSlot < 0 ? "—" :
+             (lastAdmitSlot == 0 ? "LONG" : "SHORT") + " | Chop " +
+             array.get(refGrade, lastAdmitSlot), neutral, panelFont)
+        f_cell(panel, 2, 16, "Last gross R:R", neutral, panelFont)
+        f_cell(panel, 3, 16, na(lastAdmitRR) ? "—" :
+             str.tostring(lastAdmitRR, "#.##"), neutral, panelFont)
+
+        f_cell(panel, 0, 17, "Admitted at", neutral, panelFont)
+        f_cell(panel, 1, 17, lastAdmitTime < 0 ? "—" :
+             str.format_time(lastAdmitTime, "MM-dd HH:mm", logTimezone),
+             neutral, panelFont)
+        f_cell(panel, 2, 17, "Drawings represent", neutral, panelFont)
+        f_cell(panel, 3, 17, "Price reference; NOT a broker position",
+             warning, panelFont)
+
+        f_cell(panel, 0, 18, "Trading day (exchange timezone)", neutral, panelFont)
+        f_cell(panel, 1, 18, na(crtCountDay) ? "—" :
+             str.format_time(crtCountDay, "yyyy-MM-dd", syminfo.timezone),
+             neutral, panelFont)
+        f_cell(panel, 2, 18, "Accounting source", neutral, panelFont)
+        f_cell(panel, 3, 18, "Chart signals; NOT fills or P&L",
+             warning, panelFont)
+
+        f_cell(panel, 0, 19, "Sizing instrument", neutral, panelFont)
+        f_cell(panel, 1, 19, crtExecutionName,
+             crtRiskModelOK ? neutral : warning, panelFont)
+        f_cell(panel, 2, 19, "USD / point / contract", neutral, panelFont)
+        f_cell(panel, 3, 19, f_money(crtPointValue),
+             crtRiskModelOK ? neutral : warning, panelFont)
+
+        f_cell(panel, 0, 20, "Max risk / signal", neutral, panelFont)
+        f_cell(panel, 1, 20, f_money(crtMaxRisk), neutral, panelFont)
+        f_cell(panel, 2, 20, "Risk budget (clamped to DLL)", neutral, panelFont)
+        f_cell(panel, 3, 20, f_money(crtDailyBudgetEff), neutral, panelFont)
+
+        f_cell(panel, 0, 21, "Reserved signal risk", neutral, panelFont)
+        f_cell(panel, 1, 21, f_money(crtReservedRisk), neutral, panelFont)
+        f_cell(panel, 2, 21, "Unreserved budget", neutral, panelFont)
+        f_cell(panel, 3, 21, f_money(remainingDailyRisk),
+             remainingDailyRisk <= 0 ? warning : neutral, panelFont)
+
+        f_cell(panel, 0, 22, "Combined signals / day", neutral, panelFont)
+        f_cell(panel, 1, 22,
+             str.tostring(totalSignals) + " / " + str.tostring(crtMaxTotal),
+             totalSignals >= crtMaxTotal ? warning : neutral, panelFont)
+        f_cell(panel, 2, 22, "Max concurrent / contracts", neutral, panelFont)
+        f_cell(panel, 3, 22, str.tostring(crtMaxConcurrent) + " / " +
+             str.tostring(crtMaxContracts), neutral, panelFont)
+
+        f_cell(panel, 0, 23, "Minimum gross R:R", neutral, panelFont)
+        f_cell(panel, 1, 23, str.tostring(crtMinRR, "#.##"), neutral, panelFont)
+        f_cell(panel, 2, 23, "Cost allowance / contract", neutral, panelFont)
+        f_cell(panel, 3, 23, f_money(crtCostAllowance), neutral, panelFont)
+
+        f_cell(panel, 0, 24, "Session boundary", neutral, panelFont)
+        f_cell(panel, 1, 24,
+             crtSessionMode == "Snap to chart candles" ? "Snap" : "Strict",
+             neutral, panelFont)
+        f_cell(panel, 2, 24, "Eligible candles / session", neutral, panelFont)
+        f_cell(panel, 3, 24, str.tostring(crtSessionCandles), neutral, panelFont)
+
+        string biasSourceText = na(crtBiasBody) ? " (warming up)" :
+             crtBiasSource == "60-minute" and timeframe.multiplier != 60 ?
+             " (60m)" : " (chart)"
+        string biasFilterText = crtUseBias ?
+             (crtBiasPolicy == "Require alignment" ? "Require alignment" :
+             "Block counter-bias only") : "Disabled"
+        string biasBlockingText = not crtUseBias ? "Inactive" :
+             f_biasBlocked(1) and f_biasBlocked(-1) ? "Both directions" :
+             f_biasBlocked(1) ? "LONG blocked" :
+             f_biasBlocked(-1) ? "SHORT blocked" : "Allows both"
+
+        f_cell(panel, 0, 25, "1H bias", neutral, panelFont)
+        f_cell(panel, 1, 25, f_biasText(crtBiasDirection) + biasSourceText,
+             na(crtBiasBody) or not crtUseBias ? neutral : positive, panelFont)
+        f_cell(panel, 2, 25, "Bias candle close", neutral, panelFont)
+        f_cell(panel, 3, 25, crtBiasTime > 0 ?
+             str.format_time(crtBiasTime, "MM-dd HH:mm", logTimezone) : "—",
+             neutral, panelFont)
+
+        f_cell(panel, 0, 26, "Bias filter", neutral, panelFont)
+        f_cell(panel, 1, 26, biasFilterText,
+             crtUseBias ? neutral : warning, panelFont)
+        f_cell(panel, 2, 26, "Bias blocking", neutral, panelFont)
+        f_cell(panel, 3, 26, biasBlockingText,
+             crtUseBias and (f_biasBlocked(1) or f_biasBlocked(-1)) ?
+             warning : neutral, panelFont)
+
+        f_cell(panel, 0, 27, "Day outcomes: T / S", neutral, panelFont)
+        f_cell(panel, 1, 27,
+             str.tostring(array.get(ledDayCounts, 0)) + " / " +
+             str.tostring(array.get(ledDayCounts, 1)), neutral, panelFont)
+        f_cell(panel, 2, 27, "Ambiguous / unresolved", neutral, panelFont)
+        f_cell(panel, 3, 27,
+             str.tostring(array.get(ledDayCounts, 2)) + " / " +
+             str.tostring(array.get(ledDayCounts, 3) +
+             array.get(ledDayCounts, 4) + array.get(ledDayCounts, 5)),
+             array.get(ledDayCounts, 2) > 0 ? warning : neutral, panelFont)
+
+        f_cell(panel, 0, 28, "Day gross reference P&L", neutral, panelFont)
+        f_cell(panel, 1, 28, f_money(ledDayGross), neutral, panelFont)
+        f_cell(panel, 2, 28, "Day net reference P&L", neutral, panelFont)
+        f_cell(panel, 3, 28, f_money(ledDayNet),
+             ledDayNet < 0 ? warning : ledDayNet > 0 ? positive : neutral,
+             panelFont)
+
+        f_cell(panel, 0, 29, "Session net reference P&L", neutral, panelFont)
+        f_cell(panel, 1, 29, f_money(ledSessionNet),
+             ledSessionNet < 0 ? warning :
+             ledSessionNet > 0 ? positive : neutral, panelFont)
+        f_cell(panel, 2, 29, "Cumulative net — loaded history", neutral, panelFont)
+        f_cell(panel, 3, 29, f_money(ledAllNet),
+             ledAllNet < 0 ? warning : ledAllNet > 0 ? positive : neutral,
+             panelFont)
+
+        f_cell(panel, 0, 30, "Cumulative T / S — loaded history",
+             neutral, panelFont)
+        f_cell(panel, 1, 30,
+             str.tostring(array.get(ledAllCounts, 0)) + " / " +
+             str.tostring(array.get(ledAllCounts, 1)), neutral, panelFont)
+        f_cell(panel, 2, 30, "Ambiguous / unresolved", neutral, panelFont)
+        f_cell(panel, 3, 30,
+             str.tostring(array.get(ledAllCounts, 2)) + " / " +
+             str.tostring(array.get(ledAllCounts, 3) +
+             array.get(ledAllCounts, 4) + array.get(ledAllCounts, 5)),
+             neutral, panelFont)
+
+        f_cell(panel, 0, 31, "Ledger scope", neutral, panelFont)
+        f_cell(panel, 1, 31, "Reference accounting; NOT broker P&L",
+             warning, panelFont)
+        f_cell(panel, 2, 31, "Ambiguous outcomes", neutral, panelFont)
+        f_cell(panel, 3, 31, "Counted as losses", warning, panelFont)
+
+        string govStateText = govDllLocked ? "DLL lockout" :
+             govFloorBlocked ? "Floor reached" :
+             govPtStop ? "PT reached; arming stopped" :
+             govPtReached ? "PT reached" : "Active"
+        string govModeText = govDrawdownType + " / " +
+             (govFloorMode == "Static (size - DD)" ? "Static" : "Trailing")
+
+        f_cell(panel, 0, 32, "Ref equity (reference)", neutral, panelFont)
+        f_cell(panel, 1, 32, f_money(govEquity),
+             govEquity < govFloor ? warning : neutral, panelFont)
+        f_cell(panel, 2, 32, "Ref % to profit target", neutral, panelFont)
+        f_cell(panel, 3, 32, str.tostring(govPctToPT, "#.0") + "%",
+             govPtReached ? positive : neutral, panelFont)
+
+        f_cell(panel, 0, 33, "Ref day P&L", neutral, panelFont)
+        f_cell(panel, 1, 33, f_money(ledDayNet),
+             ledDayNet < 0 ? warning : ledDayNet > 0 ? positive : neutral,
+             panelFont)
+        f_cell(panel, 2, 33, "DLL headroom", neutral, panelFont)
+        f_cell(panel, 3, 33, f_money(govDllHeadroom),
+             govDllLocked ? warning : neutral, panelFont)
+
+        f_cell(panel, 0, 34, "Ref peak EOD equity", neutral, panelFont)
+        f_cell(panel, 1, 34, f_money(govPeakEquity), neutral, panelFont)
+        f_cell(panel, 2, 34, "Account floor", neutral, panelFont)
+        f_cell(panel, 3, 34, f_money(govFloor),
+             govFloorBlocked ? warning : neutral, panelFont)
+
+        f_cell(panel, 0, 35, "Governor state", neutral, panelFont)
+        f_cell(panel, 1, 35, govStateText,
+             govDllLocked or govFloorBlocked or govPtStop ?
+             warning : neutral, panelFont)
+        f_cell(panel, 2, 35, "Floor headroom", neutral, panelFont)
+        f_cell(panel, 3, 35, f_money(govFloorHeadroom),
+             govFloorHeadroom <= 0 ? warning : neutral, panelFont)
+
+        f_cell(panel, 0, 36, "Governor scope", neutral, panelFont)
+        f_cell(panel, 1, 36, "Reference accounting; NOT broker P&L",
+             warning, panelFont)
+        f_cell(panel, 2, 36, "Drawdown / floor mode", neutral, panelFont)
+        f_cell(panel, 3, 36, govModeText, neutral, panelFont)
+
+        f_cell(panel, 0, 37, "Sample close", header, panelFont)
+        f_cell(panel, 1, 37, "Score", header, panelFont)
+        f_cell(panel, 2, 37, "Grade", header, panelFont)
+        f_cell(panel, 3, 37, "Change / direction", header, panelFont)
+
+        int count = array.size(loggedScores)
+
+        if count > 0
+            for i = 0 to count - 1
+                float score = array.get(loggedScores, i)
+                float change = array.get(loggedChanges, i)
+                int sampleTime = array.get(loggedTimes, i)
+
+                f_cell(panel, 0, i + 38,
+                     str.format_time(sampleTime, "MM-dd HH:mm", logTimezone),
+                     neutral, panelFont)
+                f_cell(panel, 1, i + 38, f_number(score),
+                     f_gradeColor(score), panelFont)
+                f_cell(panel, 2, i + 38, f_grade(score),
+                     f_gradeColor(score), panelFont)
+                f_cell(panel, 3, i + 38,
+                     f_signed(change) + " / " + f_changeText(change),
+                     f_changeColor(change), panelFont)
+
+// END OF CRT NITRO v0.9.0-alpha.1
