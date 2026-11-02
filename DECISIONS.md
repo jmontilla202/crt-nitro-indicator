@@ -119,8 +119,8 @@ means "no filter" and never blocks.
 ## 14. Chart-timeframe guard
 
 `runtime.error` on charts above 15m, and when an enabled CRT timeframe is not a multiple
-of the chart timeframe (division-by-zero-safe nested checks). On a 15m chart with 15m
-enabled, the dashboard shows a same-bar trigger warning instead of an error.
+of the chart timeframe (division-by-zero-safe nested checks). All supported chart
+timeframes (1m–15m) divide 30m, 1H and 4H, so the checks only fire for custom periods.
 
 ## 15. Object creation
 
@@ -148,16 +148,25 @@ per CRT timeframe, computed from its own completed HTF candles (no `request.secu
 **Action tiers (inputs):**
 
 - grade ≤ `chopCountMax` (default `B`): counted normally — consumes a slot and alerts.
-- `chopCountMax` < grade < `chopSkipAt`: drawn as a ghost, no slot, no alerts. The
-  ghost prefix names the reason (`chop C (moderate)`); `showChopGhosts` can hide it.
-- grade ≥ `chopSkipAt` (default `F`): not drawn or tracked at all. `lastReject` becomes
-  `chop F (extreme)`, visible in the dashboard's debug row.
+- `chopCountMax` < grade < `chopSkipAt`: drawn as a ghost only when it triggers, no
+  slot, no alerts; only when `showChopGhosts` is enabled. The label carries a
+  `✕ filtered` prefix.
+- grade ≥ `chopSkipAt` (default `C`): not drawn or tracked at all. `lastReject` becomes
+  `chop C (moderate)`, visible in the dashboard's debug row.
 
 The verdict is sampled at C2 close (same place as the bias decision) and stored on the
 setup. It never changes while the setup is live, so a triggered trade is not abandoned
 mid-flight. `n/a` (fewer than 3 completed HTF candles) counts as allowed. Counter-trend
-and chop ghosts compose: both reasons appear in the label, and the setup is never
-counted or alerted.
+and chop ghosts compose and are never counted or alerted.
 
-The default 20-candle lookback is 5h on 15m, 10h on 30m and 20h on 1H; the score is
+The default 20-candle lookback is 10h on 30m, 20h on 1H and 80h on 4H; the score is
 deliberately faster on lower timeframes.
+
+## 17. Chart drawings appear on trigger only
+
+Armed setups are tracked silently (state + dashboard + armed alerts) and create no
+lines, boxes, markers or labels. When entry fills, the entry/TP/SL lines, C1 box,
+sweep marker and label are created from the C1/C2 geometry. Setups that expire or
+invalidate before entry never draw, so only executed trades remain on the chart.
+Label text is reduced to `TF ▲/▼ #n · chop grade · R · contracts · result`; entry,
+TP and SL prices live on the lines themselves.
